@@ -20,8 +20,9 @@ namespace Termina.Layout;
 /// <see cref="HandleDownArrow"/>, <see cref="HandleHome"/>, <see cref="HandleEnd"/>,
 /// <see cref="HandlePaste"/>, <see cref="Clear"/>, <see cref="Text"/>) to customize behavior.
 /// </remarks>
-public abstract class TextInputBaseNode : LayoutNode, IAnimatedNode, IInvalidatingNode, IFocusable, IPasteReceiver
+public abstract class TextInputBaseNode : LayoutNode, IAnimatedNode, IInvalidatingNode, IFocusable, IPasteReceiver, IMouseAware
 {
+    private int _mouseAnchor = -1;
     protected readonly TimeProvider _timeProvider;
     protected readonly int _cursorBlinkMs;
     protected IDisposable? _cursorTimerSubscription;
@@ -535,6 +536,102 @@ public abstract class TextInputBaseNode : LayoutNode, IAnimatedNode, IInvalidati
     {
         _selectionStart = 0;
         _cursorPosition = _text.Length;
+    }
+
+    /// <summary>
+    /// Maps a click position relative to this node's bounds to a cursor index into the active text.
+    /// The base implementation treats the input as a single line with no scroll or prefix offset;
+    /// subclasses override to account for horizontal scroll, wrapped lines, or a committed prefix.
+    /// </summary>
+    /// <param name="localColumn">Column relative to the node's left edge.</param>
+    /// <param name="localRow">Row relative to the node's top edge.</param>
+    protected virtual int PositionToCursor(int localColumn, int localRow)
+        => Math.Clamp(localColumn, 0, _text.Length);
+
+    /// <summary>
+    /// Returns the [start, end) word boundaries in the active text surrounding <paramref name="pos"/>.
+    /// </summary>
+    private (int Start, int End) WordBoundsAt(int pos)
+    {
+        pos = Math.Clamp(pos, 0, _text.Length);
+        var start = pos;
+        while (start > 0 && !char.IsWhiteSpace(_text[start - 1]))
+            start--;
+        var end = pos;
+        while (end < _text.Length && !char.IsWhiteSpace(_text[end]))
+            end++;
+        return (start, end);
+    }
+
+    /// <inheritdoc />
+    public virtual bool HandleMouse(MouseEvent e, Rect bounds)
+    {
+        // Only the left button drives caret placement and selection.
+        if (e.Button != MouseButton.Left && e.Kind != MouseEventKind.Drag)
+            return false;
+
+        var localColumn = e.Column - bounds.X;
+        var localRow = e.Row - bounds.Y;
+
+        switch (e.Kind)
+        {
+            case MouseEventKind.Down:
+            {
+                var pos = PositionToCursor(localColumn, localRow);
+                _cursorVisible = true;
+
+                if (e.ClickChain >= 3)
+                {
+                    // Triple click: select the whole active text.
+                    _selectionStart = 0;
+                    _cursorPosition = _text.Length;
+                    _mouseAnchor = 0;
+                }
+                else if (e.ClickChain == 2)
+                {
+                    // Double click: select the word under the cursor.
+                    var (ws, we) = WordBoundsAt(pos);
+                    _selectionStart = ws;
+                    _cursorPosition = we;
+                    _mouseAnchor = ws;
+                }
+                else if ((e.Modifiers & ConsoleModifiers.Shift) != 0 && _cursorPosition >= 0)
+                {
+                    // Shift-click: extend the existing selection to the click point.
+                    if (_selectionStart < 0)
+                        _selectionStart = _cursorPosition;
+                    _cursorPosition = pos;
+                    _mouseAnchor = _selectionStart;
+                }
+                else
+                {
+                    _cursorPosition = pos;
+                    _selectionStart = -1;
+                    _mouseAnchor = pos;
+                }
+
+                _invalidated.OnNext(Unit.Default);
+                return true;
+            }
+
+            case MouseEventKind.Drag:
+            {
+                if (_mouseAnchor < 0)
+                    _mouseAnchor = _cursorPosition;
+                _selectionStart = _mouseAnchor;
+                _cursorPosition = PositionToCursor(localColumn, localRow);
+                _cursorVisible = true;
+                _invalidated.OnNext(Unit.Default);
+                return true;
+            }
+
+            case MouseEventKind.Up:
+                // Selection is finalized in place; copy is driven by the app (Ctrl+C / CopyOnSelect).
+                return true;
+
+            default:
+                return false;
+        }
     }
 
     protected void DeleteSelection()

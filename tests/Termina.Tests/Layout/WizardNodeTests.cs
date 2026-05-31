@@ -654,6 +654,7 @@ public class WizardNodeTests
         public int Height => 24;
         public void WriteAt(int x, int y, string text) { }
         public void WriteAt(int x, int y, char c) { }
+        public void WriteControlAt(int x, int y, string sequence) { }
         public void SetForeground(Color color) { }
         public void SetBackground(Color color) { }
         public void ResetColors() { }

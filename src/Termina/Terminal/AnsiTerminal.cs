@@ -21,8 +21,9 @@ public sealed class AnsiTerminal : IAnsiTerminal, IDisposable
     private readonly StringBuilder _buffer = new();
     private readonly bool _useAlternateScreen;
     private bool _inAlternateScreen;
-    private bool _mouseEnabled;
+    private MouseMode _mouseMode;
     private bool _wheelScrollEnabled;
+    private string? _currentLink;
     private long _totalBytesWritten;
     private int _flushCount;
 
@@ -125,6 +126,16 @@ public sealed class AnsiTerminal : IAnsiTerminal, IDisposable
     }
 
     /// <inheritdoc />
+    public void WriteControlAt(int x, int y, string sequence)
+    {
+        if (string.IsNullOrEmpty(sequence))
+            return;
+
+        MoveTo(x, y);
+        _buffer.Append(sequence);
+    }
+
+    /// <inheritdoc />
     public void SetForeground(Color color)
     {
         _buffer.Append(color.ToForegroundAnsi());
@@ -140,6 +151,44 @@ public sealed class AnsiTerminal : IAnsiTerminal, IDisposable
     public void ResetColors()
     {
         _buffer.Append(AnsiCodes.Reset);
+    }
+
+    /// <inheritdoc />
+    public void SetDecoration(TextDecoration decoration)
+    {
+        _buffer.Append(AnsiCodes.ResetBold);
+        _buffer.Append(AnsiCodes.ResetItalic);
+        _buffer.Append(AnsiCodes.ResetUnderline);
+        _buffer.Append(AnsiCodes.ResetStrikethrough);
+
+        if (decoration == TextDecoration.None)
+            return;
+
+        if (decoration.HasFlag(TextDecoration.Bold))
+            _buffer.Append(AnsiCodes.Bold);
+        if (decoration.HasFlag(TextDecoration.Dim))
+            _buffer.Append(AnsiCodes.Dim);
+        if (decoration.HasFlag(TextDecoration.Italic))
+            _buffer.Append(AnsiCodes.Italic);
+        if (decoration.HasFlag(TextDecoration.Underline))
+            _buffer.Append(AnsiCodes.Underline);
+        if (decoration.HasFlag(TextDecoration.Strikethrough))
+            _buffer.Append(AnsiCodes.Strikethrough);
+    }
+
+    /// <inheritdoc />
+    public void SetLink(string? uri)
+    {
+        if (uri == _currentLink)
+            return;
+
+        // Close the previous link before opening a new one (or just closing).
+        if (_currentLink is not null)
+            _buffer.Append(AnsiCodes.HyperlinkEnd);
+        if (!string.IsNullOrEmpty(uri))
+            _buffer.Append(AnsiCodes.Hyperlink(uri));
+
+        _currentLink = uri;
     }
 
     /// <inheritdoc />
@@ -231,25 +280,71 @@ public sealed class AnsiTerminal : IAnsiTerminal, IDisposable
     }
 
     /// <inheritdoc />
-    public void EnableMouse()
+    public void EnableMouse() => SetMouseMode(MouseMode.Buttons | MouseMode.Drag);
+
+    /// <inheritdoc />
+    public void DisableMouse() => SetMouseMode(MouseMode.None);
+
+    /// <inheritdoc />
+    public void SetMouseMode(MouseMode mode)
     {
-        if (!_mouseEnabled)
-        {
+        if (mode == _mouseMode)
+            return;
+
+        var old = _mouseMode;
+
+        // Decompose each flag set into the concrete DEC private modes the terminal understands.
+        // Hover implies Drag implies Buttons; pixel reporting only applies when tracking is on.
+        static bool AnyTracking(MouseMode m) => (m & (MouseMode.Buttons | MouseMode.Drag | MouseMode.Hover)) != 0;
+        static bool WantsButtonEvent(MouseMode m) => (m & MouseMode.Drag) != 0 && (m & MouseMode.Hover) == 0;
+        static bool WantsAnyEvent(MouseMode m) => (m & MouseMode.Hover) != 0;
+        static bool WantsPixels(MouseMode m) => (m & MouseMode.Pixel) != 0 && AnyTracking(m);
+
+        var oldTrack = AnyTracking(old);
+        var newTrack = AnyTracking(mode);
+
+        // Disables first (pixel/SGR last-in, first-out), then enables (SGR last so it wins).
+        if (WantsPixels(old) && !WantsPixels(mode))
+            _buffer.Append(AnsiCodes.DisableMousePixels);
+        if (oldTrack && !newTrack)
+            _buffer.Append(AnsiCodes.DisableMouseSgr);
+        if (WantsAnyEvent(old) && !WantsAnyEvent(mode))
+            _buffer.Append(AnsiCodes.DisableMouseAnyEvent);
+        if (WantsButtonEvent(old) && !WantsButtonEvent(mode))
+            _buffer.Append(AnsiCodes.DisableMouseButtonEvent);
+        if (oldTrack && !newTrack)
+            _buffer.Append(AnsiCodes.DisableMouseNormal);
+        if ((old & MouseMode.Focus) != 0 && (mode & MouseMode.Focus) == 0)
+            _buffer.Append(AnsiCodes.DisableFocusTracking);
+
+        if ((mode & MouseMode.Focus) != 0 && (old & MouseMode.Focus) == 0)
+            _buffer.Append(AnsiCodes.EnableFocusTracking);
+        if (newTrack && !oldTrack)
             _buffer.Append(AnsiCodes.EnableMouseNormal);
+        if (WantsButtonEvent(mode) && !WantsButtonEvent(old))
+            _buffer.Append(AnsiCodes.EnableMouseButtonEvent);
+        if (WantsAnyEvent(mode) && !WantsAnyEvent(old))
+            _buffer.Append(AnsiCodes.EnableMouseAnyEvent);
+        if (newTrack && !oldTrack)
             _buffer.Append(AnsiCodes.EnableMouseSgr);
-            _mouseEnabled = true;
-        }
+        if (WantsPixels(mode) && !WantsPixels(old))
+            _buffer.Append(AnsiCodes.EnableMousePixels);
+
+        _mouseMode = mode;
     }
 
     /// <inheritdoc />
-    public void DisableMouse()
+    public void DisableAllMouseTracking()
     {
-        if (_mouseEnabled)
-        {
-            _buffer.Append(AnsiCodes.DisableMouseSgr);
-            _buffer.Append(AnsiCodes.DisableMouseNormal);
-            _mouseEnabled = false;
-        }
+        // Write every disable unconditionally — defensive teardown must clear modes that a
+        // capability probe or app may have enabled without updating our tracked state.
+        _buffer.Append(AnsiCodes.DisableMousePixels);
+        _buffer.Append(AnsiCodes.DisableMouseSgr);
+        _buffer.Append(AnsiCodes.DisableMouseAnyEvent);
+        _buffer.Append(AnsiCodes.DisableMouseButtonEvent);
+        _buffer.Append(AnsiCodes.DisableMouseNormal);
+        _buffer.Append(AnsiCodes.DisableFocusTracking);
+        _mouseMode = MouseMode.None;
     }
 
     /// <inheritdoc />
@@ -306,9 +401,9 @@ public sealed class AnsiTerminal : IAnsiTerminal, IDisposable
     /// </summary>
     public void Dispose()
     {
-        if (_mouseEnabled)
+        if (_mouseMode != MouseMode.None)
         {
-            DisableMouse();
+            DisableAllMouseTracking();
         }
 
         if (_wheelScrollEnabled)

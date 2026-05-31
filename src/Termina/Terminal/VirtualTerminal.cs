@@ -11,9 +11,11 @@ namespace Termina.Terminal;
 /// </summary>
 public sealed class VirtualTerminal : IAnsiTerminal
 {
-    private readonly char[,] _buffer;
-    private readonly Color[,] _foreground;
-    private readonly Color[,] _background;
+    private string[,] _buffer;
+    private bool[,] _continuation;
+    private Color[,] _foreground;
+    private Color[,] _background;
+    private TextDecoration[,] _decoration;
     private readonly List<string> _rawOutput = new();
 
     private int _cursorX;
@@ -22,6 +24,8 @@ public sealed class VirtualTerminal : IAnsiTerminal
     private int _savedCursorY;
     private Color _currentForeground = Color.Default;
     private Color _currentBackground = Color.Default;
+    private TextDecoration _currentDecoration = TextDecoration.None;
+    private string? _currentLink;
 
     /// <summary>
     /// Create a virtual terminal with the specified dimensions.
@@ -30,9 +34,11 @@ public sealed class VirtualTerminal : IAnsiTerminal
     {
         Width = width;
         Height = height;
-        _buffer = new char[height, width];
+        _buffer = new string[height, width];
+        _continuation = new bool[height, width];
         _foreground = new Color[height, width];
         _background = new Color[height, width];
+        _decoration = new TextDecoration[height, width];
         Clear();
     }
 
@@ -63,9 +69,14 @@ public sealed class VirtualTerminal : IAnsiTerminal
     public bool InAlternateScreen { get; private set; }
 
     /// <summary>
-    /// Whether mouse tracking is enabled.
+    /// Whether mouse tracking is enabled (any tracking mode active).
     /// </summary>
-    public bool MouseEnabled { get; private set; }
+    public bool MouseEnabled => MouseMode != MouseMode.None;
+
+    /// <summary>
+    /// The currently active mouse tracking modes.
+    /// </summary>
+    public MouseMode MouseMode { get; private set; }
 
     /// <summary>
     /// Whether alternate-scroll (wheel-only) mode is enabled.
@@ -88,22 +99,31 @@ public sealed class VirtualTerminal : IAnsiTerminal
     public void Write(string text)
     {
         _rawOutput.Add(text);
-        foreach (var c in text)
+        foreach (var grapheme in TerminalText.EnumerateGraphemes(text))
         {
-            WriteChar(c);
+            WriteGrapheme(grapheme.Text, grapheme.Width);
         }
     }
 
     /// <inheritdoc />
     public void Write(char c)
     {
-        _rawOutput.Add(c.ToString());
-        WriteChar(c);
+        Write(c.ToString());
     }
 
-    private void WriteChar(char c)
+    /// <inheritdoc />
+    public void WriteControlAt(int x, int y, string sequence)
     {
-        if (c == '\n')
+        if (string.IsNullOrEmpty(sequence))
+            return;
+
+        _rawOutput.Add(AnsiCodes.MoveTo(y, x));
+        _rawOutput.Add(sequence);
+    }
+
+    private void WriteGrapheme(string text, int width)
+    {
+        if (text == "\n")
         {
             _cursorX = 0;
             _cursorY++;
@@ -115,18 +135,48 @@ public sealed class VirtualTerminal : IAnsiTerminal
             return;
         }
 
-        if (c == '\r')
+        if (text == "\r")
         {
             _cursorX = 0;
             return;
         }
 
+        if (text == "\t")
+        {
+            var nextTab = ((_cursorX / 8) + 1) * 8;
+            while (_cursorX < nextTab && _cursorX < Width)
+                WriteGrapheme(" ", 1);
+            return;
+        }
+
+        if (width <= 0)
+            return;
+        if (width > Width)
+            return;
+        if (_cursorX + width > Width)
+        {
+            _cursorX = 0;
+            _cursorY++;
+            if (_cursorY >= Height)
+                return;
+        }
+
         if (_cursorX < Width && _cursorY < Height)
         {
-            _buffer[_cursorY, _cursorX] = c;
+            _buffer[_cursorY, _cursorX] = text;
+            _continuation[_cursorY, _cursorX] = false;
             _foreground[_cursorY, _cursorX] = _currentForeground;
             _background[_cursorY, _cursorX] = _currentBackground;
-            _cursorX++;
+            _decoration[_cursorY, _cursorX] = _currentDecoration;
+            for (var i = 1; i < width && _cursorX + i < Width; i++)
+            {
+                _buffer[_cursorY, _cursorX + i] = string.Empty;
+                _continuation[_cursorY, _cursorX + i] = true;
+                _foreground[_cursorY, _cursorX + i] = _currentForeground;
+                _background[_cursorY, _cursorX + i] = _currentBackground;
+                _decoration[_cursorY, _cursorX + i] = _currentDecoration;
+            }
+            _cursorX += width;
 
             if (_cursorX >= Width)
             {
@@ -157,6 +207,27 @@ public sealed class VirtualTerminal : IAnsiTerminal
     {
         _currentForeground = Color.Default;
         _currentBackground = Color.Default;
+        _currentDecoration = TextDecoration.None;
+    }
+
+    /// <inheritdoc />
+    public void SetDecoration(TextDecoration decoration)
+    {
+        _currentDecoration = decoration;
+    }
+
+    /// <inheritdoc />
+    public void SetLink(string? uri)
+    {
+        // Record the OSC 8 transition into the ordered raw-output log so tests can assert the
+        // hyperlink wrapper is emitted in-band with the text it wraps.
+        if (uri == _currentLink)
+            return;
+        if (_currentLink is not null)
+            _rawOutput.Add(AnsiCodes.HyperlinkEnd);
+        if (!string.IsNullOrEmpty(uri))
+            _rawOutput.Add(AnsiCodes.Hyperlink(uri));
+        _currentLink = uri;
     }
 
     /// <inheritdoc />
@@ -188,9 +259,11 @@ public sealed class VirtualTerminal : IAnsiTerminal
             {
                 if (row >= 0 && col >= 0)
                 {
-                    _buffer[row, col] = ' ';
+                    _buffer[row, col] = " ";
+                    _continuation[row, col] = false;
                     _foreground[row, col] = Color.Default;
                     _background[row, col] = Color.Default;
+                    _decoration[row, col] = TextDecoration.None;
                 }
             }
         }
@@ -224,13 +297,25 @@ public sealed class VirtualTerminal : IAnsiTerminal
     /// <inheritdoc />
     public void EnableMouse()
     {
-        MouseEnabled = true;
+        MouseMode = MouseMode.Buttons | MouseMode.Drag;
     }
 
     /// <inheritdoc />
     public void DisableMouse()
     {
-        MouseEnabled = false;
+        MouseMode = MouseMode.None;
+    }
+
+    /// <inheritdoc />
+    public void SetMouseMode(MouseMode mode)
+    {
+        MouseMode = mode;
+    }
+
+    /// <inheritdoc />
+    public void DisableAllMouseTracking()
+    {
+        MouseMode = MouseMode.None;
     }
 
     /// <inheritdoc />
@@ -260,9 +345,11 @@ public sealed class VirtualTerminal : IAnsiTerminal
         {
             for (var x = 0; x < Width; x++)
             {
-                _buffer[y, x] = ' ';
+                _buffer[y, x] = " ";
+                _continuation[y, x] = false;
                 _foreground[y, x] = Color.Default;
                 _background[y, x] = Color.Default;
+                _decoration[y, x] = TextDecoration.None;
             }
         }
     }
@@ -272,18 +359,22 @@ public sealed class VirtualTerminal : IAnsiTerminal
     /// </summary>
     public void Resize(int newWidth, int newHeight)
     {
-        var newBuffer = new char[newHeight, newWidth];
+        var newBuffer = new string[newHeight, newWidth];
+        var newContinuation = new bool[newHeight, newWidth];
         var newForeground = new Color[newHeight, newWidth];
         var newBackground = new Color[newHeight, newWidth];
+        var newDecoration = new TextDecoration[newHeight, newWidth];
 
         // Initialize with spaces
         for (var y = 0; y < newHeight; y++)
         {
             for (var x = 0; x < newWidth; x++)
             {
-                newBuffer[y, x] = ' ';
+                newBuffer[y, x] = " ";
+                newContinuation[y, x] = false;
                 newForeground[y, x] = Color.Default;
                 newBackground[y, x] = Color.Default;
+                newDecoration[y, x] = TextDecoration.None;
             }
         }
 
@@ -295,12 +386,20 @@ public sealed class VirtualTerminal : IAnsiTerminal
             for (var x = 0; x < copyWidth; x++)
             {
                 newBuffer[y, x] = _buffer[y, x];
+                newContinuation[y, x] = _continuation[y, x];
                 newForeground[y, x] = _foreground[y, x];
                 newBackground[y, x] = _background[y, x];
+                newDecoration[y, x] = _decoration[y, x];
             }
         }
 
-        // Update dimensions (can't reassign readonly arrays, so we copy reference)
+        _buffer = newBuffer;
+        _continuation = newContinuation;
+        _foreground = newForeground;
+        _background = newBackground;
+        _decoration = newDecoration;
+
+        // Update dimensions
         Width = newWidth;
         Height = newHeight;
 
@@ -318,7 +417,7 @@ public sealed class VirtualTerminal : IAnsiTerminal
     {
         if (x < 0 || x >= Width || y < 0 || y >= Height)
             return ' ';
-        return _buffer[y, x];
+        return string.IsNullOrEmpty(_buffer[y, x]) ? ' ' : _buffer[y, x][0];
     }
 
     /// <summary>
@@ -342,6 +441,16 @@ public sealed class VirtualTerminal : IAnsiTerminal
     }
 
     /// <summary>
+    /// Get the text decoration at the specified position.
+    /// </summary>
+    public TextDecoration GetDecoration(int x, int y)
+    {
+        if (x < 0 || x >= Width || y < 0 || y >= Height)
+            return TextDecoration.None;
+        return _decoration[y, x];
+    }
+
+    /// <summary>
     /// Get a single line from the buffer.
     /// </summary>
     public string GetLine(int y)
@@ -352,7 +461,8 @@ public sealed class VirtualTerminal : IAnsiTerminal
         var sb = new StringBuilder(Width);
         for (var x = 0; x < Width; x++)
         {
-            sb.Append(_buffer[y, x]);
+            if (!_continuation[y, x])
+                sb.Append(_buffer[y, x]);
         }
         return sb.ToString().TrimEnd();
     }
@@ -370,7 +480,8 @@ public sealed class VirtualTerminal : IAnsiTerminal
             {
                 if (row >= 0 && col >= 0)
                 {
-                    sb.Append(_buffer[row, col]);
+                    if (!_continuation[row, col])
+                        sb.Append(_buffer[row, col]);
                 }
             }
         }

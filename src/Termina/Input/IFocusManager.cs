@@ -56,6 +56,14 @@ public interface IFocusManager
     void SetFocus(IFocusable focusable);
 
     /// <summary>
+    /// Set focus in response to a pointer (mouse) click. Behaves like <see cref="SetFocus"/> but is
+    /// kept distinct so pointer-driven focus changes can be reasoned about (and tested) separately
+    /// from keyboard navigation. No-op if the target already has focus or cannot be focused.
+    /// </summary>
+    /// <param name="focusable">The component clicked on.</param>
+    void SetFocusFromPointer(IFocusable focusable);
+
+    /// <summary>
     /// Clear all focus, leaving no component focused.
     /// </summary>
     void ClearFocus();

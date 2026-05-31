@@ -1,8 +1,6 @@
 // Copyright (c) Petabridge, LLC. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
-using System.Text;
-
 namespace Termina.Terminal;
 
 /// <summary>
@@ -39,6 +37,7 @@ public sealed class DiffingTerminal : IAnsiTerminal, IDisposable
     private Color _currentForeground = Color.Default;
     private Color _currentBackground = Color.Default;
     private TextDecoration _currentDecoration = TextDecoration.None;
+    private string? _currentLink;
 
     // Saved cursor position
     private int _savedCursorX;
@@ -51,6 +50,7 @@ public sealed class DiffingTerminal : IAnsiTerminal, IDisposable
     private Color _lastOutputForeground = Color.Default;
     private Color _lastOutputBackground = Color.Default;
     private TextDecoration _lastOutputDecoration = TextDecoration.None;
+    private string? _lastOutputLink;
 
     /// <summary>
     /// Creates a new DiffingTerminal wrapping the specified terminal.
@@ -92,49 +92,73 @@ public sealed class DiffingTerminal : IAnsiTerminal, IDisposable
     /// <inheritdoc />
     public void Write(string text)
     {
-        foreach (var c in text)
+        foreach (var grapheme in TerminalText.EnumerateGraphemes(text))
         {
-            WriteCharToBuffer(c);
+            WriteGraphemeToBuffer(grapheme.Text, grapheme.Width);
         }
     }
 
     /// <inheritdoc />
     public void Write(char c)
     {
-        WriteCharToBuffer(c);
+        Write(c.ToString());
     }
 
-    private void WriteCharToBuffer(char c)
+    /// <inheritdoc />
+    public void WriteControlAt(int x, int y, string sequence)
+    {
+        if (string.IsNullOrEmpty(sequence))
+            return;
+
+        _inner.WriteControlAt(x, y, sequence);
+    }
+
+    private void WriteGraphemeToBuffer(string text, int width)
     {
         if (_cursorX < 0 || _cursorX >= Width || _cursorY < 0 || _cursorY >= Height)
             return;
 
         // Handle special characters
-        switch (c)
+        switch (text)
         {
-            case '\n':
+            case "\n":
                 _cursorY++;
                 _cursorX = 0;
                 return;
-            case '\r':
+            case "\r":
                 _cursorX = 0;
                 return;
-            case '\t':
+            case "\t":
                 // Tab to next 8-column boundary
                 var nextTab = ((_cursorX / 8) + 1) * 8;
                 while (_cursorX < nextTab && _cursorX < Width)
                 {
-                    WriteCharToBuffer(' ');
+                    WriteGraphemeToBuffer(" ", 1);
                 }
                 return;
         }
 
+        if (width <= 0)
+            return;
+        if (width > Width)
+            return;
+        if (_cursorX + width > Width)
+        {
+            _cursorX = 0;
+            _cursorY++;
+            if (_cursorY >= Height)
+                return;
+        }
+
         // Write the cell to pending buffer
-        var cell = new TerminalCell(c, _currentForeground, _currentBackground, _currentDecoration);
+        var cell = new TerminalCell(text, _currentForeground, _currentBackground, _currentDecoration, _currentLink);
         _pendingFrame.TrySet(_cursorX, _cursorY, cell);
+        for (var i = 1; i < width; i++)
+            _pendingFrame.TrySet(_cursorX + i, _cursorY,
+                TerminalCell.Continuation(_currentForeground, _currentBackground, _currentDecoration, _currentLink));
 
         // Advance cursor
-        _cursorX++;
+        _cursorX += width;
         if (_cursorX >= Width)
         {
             _cursorX = 0;
@@ -160,6 +184,15 @@ public sealed class DiffingTerminal : IAnsiTerminal, IDisposable
     public void SetDecoration(TextDecoration decoration)
     {
         _currentDecoration = decoration;
+    }
+
+    /// <inheritdoc />
+    public void SetLink(string? uri)
+    {
+        // Ambient state, recorded onto cells in WriteGraphemeToBuffer and emitted at flush time.
+        // Deliberately independent of ResetColors so a link survives the per-segment style resets
+        // a node performs while drawing the linked text.
+        _currentLink = uri;
     }
 
     /// <inheritdoc />
@@ -265,6 +298,7 @@ public sealed class DiffingTerminal : IAnsiTerminal, IDisposable
         _lastOutputForeground = Color.Default;
         _lastOutputBackground = Color.Default;
         _lastOutputDecoration = TextDecoration.None;
+        _lastOutputLink = null;
 
         for (var y = 0; y < _pendingFrame.Height; y++)
         {
@@ -273,9 +307,18 @@ public sealed class DiffingTerminal : IAnsiTerminal, IDisposable
             for (var x = 0; x < _pendingFrame.Width; x++)
             {
                 var cell = _pendingFrame[x, y];
+                if (cell.IsContinuation)
+                    continue;
                 EmitStyleChanges(cell);
-                _inner.Write(cell.Character);
+                _inner.Write(cell.Text);
             }
+        }
+
+        // Close any dangling hyperlink so the terminal isn't left in an open-link state.
+        if (_lastOutputLink is not null)
+        {
+            _inner.SetLink(null);
+            _lastOutputLink = null;
         }
 
         _inner.ResetColors();
@@ -290,16 +333,36 @@ public sealed class DiffingTerminal : IAnsiTerminal, IDisposable
         _lastOutputForeground = Color.Default;
         _lastOutputBackground = Color.Default;
         _lastOutputDecoration = TextDecoration.None;
+        _lastOutputLink = null;
 
         // Use GetChangedRuns for efficient output (groups consecutive changes)
         foreach (var (y, startX, cells) in _pendingFrame.GetChangedRuns(_currentFrame))
         {
             _inner.MoveTo(startX, y);
+            var outputX = startX;
 
-            foreach (var cell in cells)
+            for (var i = 0; i < cells.Length; i++)
             {
+                var cell = cells[i];
+                var cellX = startX + i;
+                if (cell.IsContinuation)
+                    continue;
+                if (outputX != cellX)
+                {
+                    _inner.MoveTo(cellX, y);
+                    outputX = cellX;
+                }
                 EmitStyleChanges(cell);
-                _inner.Write(cell.Character);
+                _inner.Write(cell.Text);
+                outputX += TerminalText.GetDisplayWidth(cell.Text);
+            }
+
+            // A changed run may end inside a link span; close it so the link never bleeds past the
+            // emitted run into cells the diff didn't touch.
+            if (_lastOutputLink is not null)
+            {
+                _inner.SetLink(null);
+                _lastOutputLink = null;
             }
         }
 
@@ -314,6 +377,14 @@ public sealed class DiffingTerminal : IAnsiTerminal, IDisposable
     /// </summary>
     private void EmitStyleChanges(TerminalCell cell)
     {
+        // Open/close the OSC 8 hyperlink in-band, before the cell's text, so the wrapper travels
+        // with the deferred cell writes and survives diffing.
+        if (cell.Link != _lastOutputLink)
+        {
+            _inner.SetLink(cell.Link);
+            _lastOutputLink = cell.Link;
+        }
+
         // Check if decoration changed
         if (cell.Decoration != _lastOutputDecoration)
         {
@@ -323,7 +394,7 @@ public sealed class DiffingTerminal : IAnsiTerminal, IDisposable
             _lastOutputForeground = Color.Default;
             _lastOutputBackground = Color.Default;
 
-            EmitDecoration(cell.Decoration);
+            _inner.SetDecoration(cell.Decoration);
             _lastOutputDecoration = cell.Decoration;
         }
 
@@ -339,38 +410,6 @@ public sealed class DiffingTerminal : IAnsiTerminal, IDisposable
         {
             _inner.SetBackground(cell.Background);
             _lastOutputBackground = cell.Background;
-        }
-    }
-
-    /// <summary>
-    /// Emit ANSI codes for text decoration.
-    /// </summary>
-    private void EmitDecoration(TextDecoration decoration)
-    {
-        if (decoration == TextDecoration.None)
-            return;
-
-        // Build and emit decoration codes
-        var sb = new StringBuilder();
-
-        if ((decoration & TextDecoration.Bold) != 0)
-            sb.Append(AnsiCodes.Bold);
-
-        if ((decoration & TextDecoration.Dim) != 0)
-            sb.Append(AnsiCodes.Dim);
-
-        if ((decoration & TextDecoration.Italic) != 0)
-            sb.Append(AnsiCodes.Italic);
-
-        if ((decoration & TextDecoration.Underline) != 0)
-            sb.Append(AnsiCodes.Underline);
-
-        if ((decoration & TextDecoration.Strikethrough) != 0)
-            sb.Append(AnsiCodes.Strikethrough);
-
-        if (sb.Length > 0)
-        {
-            _inner.Write(sb.ToString());
         }
     }
 
@@ -399,6 +438,18 @@ public sealed class DiffingTerminal : IAnsiTerminal, IDisposable
     public void DisableMouse()
     {
         _inner.DisableMouse();
+    }
+
+    /// <inheritdoc />
+    public void SetMouseMode(MouseMode mode)
+    {
+        _inner.SetMouseMode(mode);
+    }
+
+    /// <inheritdoc />
+    public void DisableAllMouseTracking()
+    {
+        _inner.DisableAllMouseTracking();
     }
 
     /// <inheritdoc />

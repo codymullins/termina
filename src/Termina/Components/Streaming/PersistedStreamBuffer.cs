@@ -184,6 +184,20 @@ public class PersistedStreamBuffer : IStreamingTextBuffer
     /// <inheritdoc />
     public void Append(StyledSegment segment)
     {
+        // Preserve the whole segment (not just text+style) when it carries data the plain
+        // text/style path would drop — a control sequence or a hyperlink.
+        if ((segment.HasControlSequence || segment.Link is not null) && !segment.Text.Contains('\n'))
+        {
+            lock (_lock)
+            {
+                _currentStyledLine.Append(segment);
+                _wrappedCountDirty = true;
+                if (AutoScroll && !_userScrolled)
+                    _scrollOffset = 0;
+            }
+            return;
+        }
+
         Append(segment.Text, segment.Style);
     }
 
@@ -306,6 +320,20 @@ public class PersistedStreamBuffer : IStreamingTextBuffer
             bottomIndex = Math.Min(totalWrapped, topIndex + viewportHeight);
 
             return wrappedLines.Skip(topIndex).Take(bottomIndex - topIndex).ToList();
+        }
+    }
+
+    /// <inheritdoc />
+    public int GetFirstVisibleWrappedIndex(int viewportHeight, int viewportWidth)
+    {
+        if (viewportHeight <= 0 || viewportWidth <= 0)
+            return 0;
+
+        lock (_lock)
+        {
+            var totalWrapped = GetWrappedLineCount(viewportWidth);
+            var bottomIndex = totalWrapped - _scrollOffset;
+            return Math.Max(0, bottomIndex - viewportHeight);
         }
     }
 

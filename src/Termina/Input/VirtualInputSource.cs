@@ -67,27 +67,39 @@ public sealed class VirtualInputSource : IInputSource
     /// <param name="x">X position (column).</param>
     /// <param name="y">Y position (row).</param>
     /// <param name="button">The mouse button.</param>
-    /// <param name="eventType">The type of mouse event.</param>
+    /// <param name="kind">The kind of mouse event.</param>
     /// <param name="modifiers">Optional keyboard modifiers.</param>
-    public void EnqueueMouse(int x, int y, MouseButton button, MouseEventType eventType, ConsoleModifiers modifiers = 0)
+    /// <param name="clickChain">Click chain count (1 single, 2 double, 3 triple).</param>
+    public void EnqueueMouse(int x, int y, MouseButton button, MouseEventKind kind, ConsoleModifiers modifiers = 0, int clickChain = 1)
     {
-        _inputChannel.Writer.TryWrite(new MouseEvent(x, y, button, eventType, modifiers));
+        _inputChannel.Writer.TryWrite(new MouseEvent(x, y, button, kind, modifiers, clickChain));
     }
 
     /// <summary>
-    /// Enqueue a mouse click event.
+    /// Enqueue a mouse button press at the given cell.
     /// </summary>
-    public void EnqueueClick(int x, int y, MouseButton button = MouseButton.Left)
+    public void EnqueueClick(int x, int y, MouseButton button = MouseButton.Left, ConsoleModifiers modifiers = 0, int clickChain = 1)
     {
-        EnqueueMouse(x, y, button, MouseEventType.Press);
+        EnqueueMouse(x, y, button, MouseEventKind.Down, modifiers, clickChain);
     }
 
     /// <summary>
-    /// Enqueue a mouse scroll event.
+    /// Enqueue a press followed by a release at the same cell — a complete click.
+    /// </summary>
+    public void EnqueuePressRelease(int x, int y, MouseButton button = MouseButton.Left, ConsoleModifiers modifiers = 0)
+    {
+        EnqueueMouse(x, y, button, MouseEventKind.Down, modifiers);
+        EnqueueMouse(x, y, button, MouseEventKind.Up, modifiers);
+    }
+
+    /// <summary>
+    /// Enqueue a mouse scroll event, emitted both as a rich <see cref="MouseEvent"/> and the
+    /// legacy <see cref="MouseScrollEvent"/> that focused scrollables consume.
     /// </summary>
     public void EnqueueScroll(int x, int y, bool up)
     {
-        EnqueueMouse(x, y, up ? MouseButton.WheelUp : MouseButton.WheelDown, MouseEventType.Scroll);
+        EnqueueMouse(x, y, MouseButton.None, up ? MouseEventKind.ScrollUp : MouseEventKind.ScrollDown);
+        _inputChannel.Writer.TryWrite(new MouseScrollEvent(up ? +1 : -1));
     }
 
     /// <summary>

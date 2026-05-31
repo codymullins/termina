@@ -340,6 +340,14 @@ public sealed class ScrollableContent : IRenderable, IDisposable
             _parent.WriteAt(x + _offsetX, actualY, c);
         }
 
+        public void WriteControlAt(int x, int y, string sequence)
+        {
+            var actualY = y + _offsetY;
+            if (x < 0 || x >= Width || actualY < 0 || actualY >= _parent.Height)
+                return;
+            _parent.WriteControlAt(x + _offsetX, actualY, sequence);
+        }
+
         public void SetForeground(Color color) => _parent.SetForeground(color);
         public void SetBackground(Color color) => _parent.SetBackground(color);
         public void ResetColors() => _parent.ResetColors();

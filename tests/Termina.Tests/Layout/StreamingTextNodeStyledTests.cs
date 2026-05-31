@@ -124,6 +124,23 @@ public class StreamingTextNodeStyledTests
     }
 
     [Fact]
+    public void Render_WideGrapheme_AdvancesFollowingSegmentByDisplayWidth()
+    {
+        var terminal = new VirtualTerminal(20, 4);
+        var context = new RegionRenderContext(terminal, 0, 0, 20, 4);
+        var node = StreamingTextNode.Create();
+
+        node.Append("🖼", foreground: Color.Red);
+        node.AppendLine(" HTML", foreground: Color.Blue);
+
+        node.Render(context, new Rect(0, 0, 20, 4));
+
+        Assert.Equal("🖼 HTML", terminal.GetLine(0));
+        Assert.Equal(Color.Blue, terminal.GetForeground(3, 0));
+        Assert.Equal('H', terminal.GetChar(3, 0));
+    }
+
+    [Fact]
     public void Render_WithNodeForeground_UsesAsFallback()
     {
         var terminal = new VirtualTerminal(80, 24);

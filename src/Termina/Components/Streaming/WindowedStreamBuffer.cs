@@ -155,6 +155,15 @@ public class WindowedStreamBuffer : IStreamingTextBuffer
     /// <inheritdoc />
     public void Append(StyledSegment segment)
     {
+        if ((segment.HasControlSequence || segment.Link is not null) && !segment.Text.Contains('\n'))
+        {
+            lock (_lock)
+            {
+                _currentStyledLine.Append(segment);
+            }
+            return;
+        }
+
         Append(segment.Text, segment.Style);
     }
 
@@ -221,6 +230,21 @@ public class WindowedStreamBuffer : IStreamingTextBuffer
                 return wrappedLines;
 
             return wrappedLines.Skip(wrappedLines.Count - viewportHeight).ToList();
+        }
+    }
+
+    /// <inheritdoc />
+    public int GetFirstVisibleWrappedIndex(int viewportHeight, int viewportWidth)
+    {
+        if (viewportHeight <= 0 || viewportWidth <= 0)
+            return 0;
+
+        lock (_lock)
+        {
+            var allLines = GetAllStyledLinesInternal().ToList();
+            var totalWrapped = StyledWordWrapper.CalculateTotalWrappedLineCount(allLines, viewportWidth);
+            // Windowed mode pins the viewport to the last viewportHeight wrapped lines.
+            return Math.Max(0, totalWrapped - viewportHeight);
         }
     }
 

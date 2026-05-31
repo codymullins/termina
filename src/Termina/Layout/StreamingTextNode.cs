@@ -1,8 +1,11 @@
 // Copyright (c) Petabridge, LLC. All rights reserved.
 // Licensed under the Apache 2.0 license. See LICENSE file in the project root for full license information.
 
+using System.Text;
 using R3;
 using Termina.Components.Streaming;
+using Termina.Diagnostics;
+using Termina.Input;
 using Termina.Rendering;
 using Termina.Terminal;
 
@@ -13,12 +16,37 @@ namespace Termina.Layout;
 /// </summary>
 /// <remarks>
 /// StreamingTextNode wraps an IStreamingTextBuffer (either PersistedStreamBuffer or WindowedStreamBuffer)
-/// and renders the content with automatic word wrapping and optional scrolling.
+/// and renders the content with automatic word wrapping and optional scrolling. It also supports
+/// mouse text selection (drag/word/line), clickable link spans (segments carrying a
+/// <see cref="StyledSegment.Link"/>), and link hover.
 /// </remarks>
-public sealed class StreamingTextNode : LayoutNode, IInvalidatingNode, IScrollable
+public sealed class StreamingTextNode : LayoutNode, IInvalidatingNode, IScrollable, IMouseAware, IHoverAware
 {
     private readonly IStreamingTextBuffer _buffer;
     private readonly Subject<Unit> _invalidated = new();
+    private readonly Subject<string> _linkActivated = new();
+    private readonly Subject<string?> _hoveredLink = new();
+    private readonly Subject<string> _selectionCompleted = new();
+
+    // Selection state, expressed in absolute wrapped-line coordinates at the current content width.
+    // A position is (wrapped line index, char index into that wrapped line's plain text).
+    private (int Line, int Col)? _selAnchor;
+    private (int Line, int Col)? _selCursor;
+    private (int Line, int Col)? _pressPos;
+    private bool _pressWasSingleClick;
+    private bool _selectionEnabled = true;
+    private string? _hoveredUrl;
+
+    // Render geometry captured each frame for reverse-mapping screen cells to positions.
+    private int _lastTopIndex;
+    private int _lastPrefixLen;
+
+    // Cached full wrapped-line list with logical provenance (which logical line each wrapped line
+    // came from), so selected soft-wrapped fragments rejoin without spurious newlines on copy.
+    private List<(StyledLine Line, int LogicalIndex)>? _wrappedCache;
+    private int _wrappedCacheWidth = -1;
+    private int _wrappedCacheLineCount = -1;
+    private int _wrappedCacheCharCount = -1;
 
     // Scrollbar
     private ScrollbarOptions? _scrollbarOptions;
@@ -32,6 +60,7 @@ public sealed class StreamingTextNode : LayoutNode, IInvalidatingNode, IScrollab
     private readonly Dictionary<SegmentId, int> _segmentIndices = new();  // ID -> index in _content
     private readonly Dictionary<SegmentId, IDisposable> _subscriptions = new();  // Animation subscriptions
     private readonly object _contentLock = new();  // Thread safety for content mutations
+    private readonly HashSet<string> _activeBeforeRenderControlSequences = new();
 
     // Content element types for tracking
     private abstract record ContentElement;
@@ -70,6 +99,45 @@ public sealed class StreamingTextNode : LayoutNode, IInvalidatingNode, IScrollab
     /// Gets the underlying buffer.
     /// </summary>
     public IStreamingTextBuffer Buffer => _buffer;
+
+    /// <summary>Foreground color applied to selected text.</summary>
+    public Color SelectionForeground { get; set; } = Color.Black;
+
+    /// <summary>Background color applied to selected text.</summary>
+    public Color SelectionBackground { get; set; } = Color.BrightYellow;
+
+    /// <summary>Whether mouse text selection is enabled. Default true.</summary>
+    public bool SelectionEnabled
+    {
+        get => _selectionEnabled;
+        set => _selectionEnabled = value;
+    }
+
+    /// <summary>Emits the URL when a link span is activated (single click without drag).</summary>
+    public Observable<string> LinkActivated => _linkActivated;
+
+    /// <summary>Emits the hovered link URL, or null when the cursor leaves all links.</summary>
+    public Observable<string?> HoveredLink => _hoveredLink;
+
+    /// <summary>Emits the selected text when a drag-selection completes (mouse up).</summary>
+    public Observable<string> SelectionCompleted => _selectionCompleted;
+
+    /// <summary>Whether there is a non-empty selection.</summary>
+    public bool HasSelection =>
+        _selAnchor is { } a && _selCursor is { } c && (a.Line != c.Line || a.Col != c.Col);
+
+    /// <summary>The currently selected text, with soft-wrapped lines rejoined.</summary>
+    public string SelectedText => BuildSelectedText();
+
+    /// <summary>Clears any active selection.</summary>
+    public void ClearSelection()
+    {
+        if (_selAnchor is null && _selCursor is null)
+            return;
+        _selAnchor = null;
+        _selCursor = null;
+        _invalidated.OnNext(Unit.Default);
+    }
 
     /// <summary>
     /// Creates a new StreamingTextNode with a persisted buffer (retains all content).
@@ -597,25 +665,29 @@ public sealed class StreamingTextNode : LayoutNode, IInvalidatingNode, IScrollab
         // Create a sub-context so coordinates are relative to this node's bounds
         var streamContext = context.CreateSubContext(bounds);
 
-        var prefixLen = Prefix?.Length ?? 0;
+        var prefixLen = TerminalText.GetDisplayWidth(Prefix);
         var scrollbarWidth = ShouldDrawScrollbar(bounds) ? 1 : 0;
         var contentWidth = bounds.Width - prefixLen - scrollbarWidth;
         if (contentWidth <= 0)
             return;
 
-        // Update cached viewport dimensions for IScrollable
+        // Update cached viewport dimensions for IScrollable + mouse reverse-mapping
         _lastViewportWidth = contentWidth;
         _lastViewportHeight = bounds.Height;
+        _lastPrefixLen = prefixLen;
+        _lastTopIndex = _buffer.GetFirstVisibleWrappedIndex(bounds.Height, contentWidth);
+
+        // Register the whole node as a selectable/link-bearing text region.
+        context.RegisterHit(this, bounds, HitTestKind.Text);
 
         // Get styled lines from buffer
         var styledLines = _buffer.GetVisibleStyledLines(bounds.Height, contentWidth);
+        EmitBeforeRenderControlSequences(streamContext, styledLines);
 
-        TextStyle? lastStyle = null;
+        var (selMin, selMax) = NormalizedSelection();
 
         for (var i = 0; i < bounds.Height && i < styledLines.Count; i++)
         {
-            var styledLine = styledLines[i];
-
             // Draw prefix if any
             if (!string.IsNullOrEmpty(Prefix))
             {
@@ -624,36 +696,9 @@ public sealed class StreamingTextNode : LayoutNode, IInvalidatingNode, IScrollab
                     streamContext.SetForeground(PrefixColor.Value);
                 streamContext.WriteAt(0, i, Prefix);
                 streamContext.ResetColors();
-                lastStyle = null;
             }
 
-            // Draw styled segments
-            var x = prefixLen;
-            foreach (var segment in styledLine.Segments)
-            {
-                var text = segment.Text;
-                var availableWidth = contentWidth - (x - prefixLen);
-
-                if (availableWidth <= 0)
-                    break;
-
-                if (text.Length > availableWidth)
-                    text = text[..availableWidth];
-
-                // Determine effective style (segment style with node-level fallback)
-                var effectiveStyle = GetEffectiveStyle(segment.Style);
-
-                // Apply style only if changed (optimization)
-                if (lastStyle == null || !lastStyle.Value.Equals(effectiveStyle))
-                {
-                    streamContext.ResetColors();
-                    streamContext.ApplyStyle(effectiveStyle);
-                    lastStyle = effectiveStyle;
-                }
-
-                streamContext.WriteAt(x, i, text);
-                x += text.Length;
-            }
+            DrawLine(streamContext, i, styledLines[i], _lastTopIndex + i, prefixLen, contentWidth, selMin, selMax);
         }
 
         streamContext.ResetColors();
@@ -662,12 +707,125 @@ public sealed class StreamingTextNode : LayoutNode, IInvalidatingNode, IScrollab
             DrawScrollbar(streamContext, bounds, contentWidth);
     }
 
+    /// <summary>
+    /// Draws one visible wrapped line, applying selection highlight, link hover underline, and OSC 8
+    /// hyperlink sequences. Uses a fast whole-segment path when the line is not part of the
+    /// selection, and a per-character path when it is.
+    /// </summary>
+    private void DrawLine(
+        IRenderContext context, int row, StyledLine styledLine, int absLine,
+        int prefixLen, int contentWidth,
+        (int Line, int Col)? selMin, (int Line, int Col)? selMax)
+    {
+        var lineSelected = selMin is { } mn && selMax is { } mx && absLine >= mn.Line && absLine <= mx.Line;
+        var x = prefixLen;
+        var charOffset = 0;
+
+        foreach (var segment in styledLine.Segments)
+        {
+            var text = segment.Text;
+            var availableWidth = contentWidth - (x - prefixLen);
+            if (availableWidth <= 0)
+                break;
+            if (TerminalText.GetDisplayWidth(text) > availableWidth)
+                text = TerminalText.TruncateToWidth(text, availableWidth);
+            if (text.Length == 0)
+                continue;
+
+            var isLink = !string.IsNullOrEmpty(segment.Link);
+            var isHoveredLink = isLink && segment.Link == _hoveredUrl;
+            var baseStyle = GetEffectiveStyle(segment.Style);
+            if (isHoveredLink)
+                baseStyle = new TextStyle(baseStyle.Foreground, baseStyle.Background, baseStyle.Decoration | TextDecoration.Underline);
+
+            // Tag subsequent writes with the hyperlink. The diffing terminal records this per cell
+            // and emits the OSC 8 wrapper in-band at flush, so it survives double-buffering and lets
+            // terminals with native modifier-click follow the link.
+            context.SetLink(segment.Link);
+
+            if (!isLink)
+            {
+                var controlSequence = segment.GetControlSequence();
+                if (controlSequence is not null)
+                    context.WriteControlAt(x, row, controlSequence);
+            }
+
+            if (lineSelected)
+            {
+                // Per-character so selected cells get the selection colors.
+                var col = 0;
+                foreach (var ch in text)
+                {
+                    var globalCol = charOffset + col;
+                    var selected = IsColumnSelected(absLine, globalCol, selMin!.Value, selMax!.Value);
+                    var style = selected
+                        ? new TextStyle(SelectionForeground, SelectionBackground, baseStyle.Decoration)
+                        : baseStyle;
+                    context.ResetColors();
+                    context.ApplyStyle(style);
+                    context.WriteAt(x, row, ch);
+                    x += TerminalText.GetDisplayWidth(ch.ToString());
+                    col++;
+                }
+            }
+            else
+            {
+                context.ResetColors();
+                context.ApplyStyle(baseStyle);
+                context.WriteAt(x, row, text);
+                x += TerminalText.GetDisplayWidth(text);
+            }
+
+            context.SetLink(null);
+
+            charOffset += segment.Text.Length;
+        }
+    }
+
+    private static bool IsColumnSelected(int line, int col, (int Line, int Col) min, (int Line, int Col) max)
+    {
+        var afterMin = line > min.Line || (line == min.Line && col >= min.Col);
+        var beforeMax = line < max.Line || (line == max.Line && col < max.Col);
+        return afterMin && beforeMax;
+    }
+
+    private (( int Line, int Col)? Min, (int Line, int Col)? Max) NormalizedSelection()
+    {
+        if (_selAnchor is not { } a || _selCursor is not { } c)
+            return (null, null);
+        var before = a.Line < c.Line || (a.Line == c.Line && a.Col <= c.Col);
+        return before ? (a, c) : (c, a);
+    }
+
+    private void EmitBeforeRenderControlSequences(IRenderContext context, IReadOnlyList<StyledLine> styledLines)
+    {
+        var current = new HashSet<string>();
+        foreach (var line in styledLines)
+        {
+            foreach (var segment in line.Segments)
+            {
+                if (segment.BeforeRenderControlSequence is not null)
+                    current.Add(segment.BeforeRenderControlSequence);
+            }
+        }
+
+        if (_activeBeforeRenderControlSequences.Count > 0 || current.Count > 0)
+        {
+            foreach (var sequence in _activeBeforeRenderControlSequences.Union(current))
+                context.WriteControlAt(0, 0, sequence);
+        }
+
+        _activeBeforeRenderControlSequences.Clear();
+        foreach (var sequence in current)
+            _activeBeforeRenderControlSequences.Add(sequence);
+    }
+
     private bool ShouldDrawScrollbar(Rect bounds)
     {
         if (_scrollbarOptions == null || _buffer is not PersistedStreamBuffer persisted)
             return false;
 
-        var prefixLen = Prefix?.Length ?? 0;
+        var prefixLen = TerminalText.GetDisplayWidth(Prefix);
         var contentWidthWithScrollbar = bounds.Width - prefixLen - 1;
         if (contentWidthWithScrollbar <= 0)
             return false;
@@ -728,6 +886,265 @@ public sealed class StreamingTextNode : LayoutNode, IInvalidatingNode, IScrollab
         return new TextStyle(fg, bg, segmentStyle.Decoration);
     }
 
+    // ── Mouse selection + links ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Builds (or returns cached) the full wrapped-line list with logical provenance at the given
+    /// width. Keyed on width + buffer line/char counts so append and clear invalidate it.
+    /// </summary>
+    private List<(StyledLine Line, int LogicalIndex)> EnsureWrapped(int width)
+    {
+        var lineCount = _buffer.LineCount;
+        var charCount = _buffer.CharacterCount;
+        if (_wrappedCache is not null && _wrappedCacheWidth == width
+            && _wrappedCacheLineCount == lineCount && _wrappedCacheCharCount == charCount)
+            return _wrappedCache;
+
+        var result = new List<(StyledLine, int)>();
+        var logical = _buffer.GetAllStyledLines();
+        for (var li = 0; li < logical.Count; li++)
+        {
+            foreach (var wrapped in StyledWordWrapper.WrapLine(logical[li], width))
+                result.Add((wrapped, li));
+        }
+
+        _wrappedCache = result;
+        _wrappedCacheWidth = width;
+        _wrappedCacheLineCount = lineCount;
+        _wrappedCacheCharCount = charCount;
+        return result;
+    }
+
+    /// <summary>Maps a click relative to this node's bounds to an absolute wrapped position.</summary>
+    private (int Line, int Col) ScreenToPosition(int localColumn, int localRow, List<(StyledLine Line, int LogicalIndex)> wrapped)
+    {
+        if (wrapped.Count == 0)
+            return (0, 0);
+
+        var absLine = Math.Clamp(_lastTopIndex + localRow, 0, wrapped.Count - 1);
+        var plain = wrapped[absLine].Line.ToPlainText();
+        var displayCol = Math.Max(0, localColumn - _lastPrefixLen);
+        var charIndex = DisplayColumnToCharIndex(plain, displayCol);
+        return (absLine, charIndex);
+    }
+
+    private static int DisplayColumnToCharIndex(string text, int displayColumn)
+    {
+        var width = 0;
+        for (var i = 0; i < text.Length; i++)
+        {
+            var cw = TerminalText.GetDisplayWidth(text[i].ToString());
+            if (width + cw > displayColumn)
+                return i;
+            width += cw;
+        }
+        return text.Length;
+    }
+
+    private static (int Start, int End) WordBoundsAt(string text, int pos)
+    {
+        pos = Math.Clamp(pos, 0, text.Length);
+        var start = pos;
+        while (start > 0 && !char.IsWhiteSpace(text[start - 1]))
+            start--;
+        var end = pos;
+        while (end < text.Length && !char.IsWhiteSpace(text[end]))
+            end++;
+        return (start, end);
+    }
+
+    /// <summary>Returns the link URL for the segment covering a wrapped position, or null.</summary>
+    private static string? LinkAt((int Line, int Col) pos, List<(StyledLine Line, int LogicalIndex)> wrapped)
+    {
+        if (pos.Line < 0 || pos.Line >= wrapped.Count)
+            return null;
+        var acc = 0;
+        foreach (var segment in wrapped[pos.Line].Line.Segments)
+        {
+            var len = segment.Text.Length;
+            if (pos.Col >= acc && pos.Col < acc + len)
+                return segment.Link;
+            acc += len;
+        }
+        return null;
+    }
+
+    /// <inheritdoc />
+    public bool HandleMouse(MouseEvent e, Rect bounds)
+    {
+        if (!_selectionEnabled)
+            return false;
+
+        var width = _lastViewportWidth;
+        if (width <= 0)
+            return false;
+
+        var wrapped = EnsureWrapped(width);
+        var localColumn = e.Column - bounds.X;
+        var localRow = e.Row - bounds.Y;
+
+        if (TerminaTrace.IsEnabled)
+        {
+            var dbgPos = ScreenToPosition(localColumn, localRow, wrapped);
+            var msg = $"STN.HandleMouse kind={e.Kind} col={e.Column} row={e.Row} " +
+                $"bounds=({bounds.X},{bounds.Y},{bounds.Width},{bounds.Height}) local=({localColumn},{localRow}) " +
+                $"top={_lastTopIndex} prefix={_lastPrefixLen} width={width} wrappedCount={wrapped.Count} " +
+                $"absLine={dbgPos.Line} colIdx={dbgPos.Col} link={LinkAt(dbgPos, wrapped) ?? "<null>"}";
+            TerminaTrace.Input.Debug(this, msg);
+        }
+
+        switch (e.Kind)
+        {
+            case MouseEventKind.Down:
+            {
+                if (e.Button != Termina.Input.MouseButton.Left)
+                    return false;
+
+                var pos = ScreenToPosition(localColumn, localRow, wrapped);
+                _pressPos = pos;
+                _pressWasSingleClick = e.ClickChain == 1;
+
+                if (e.ClickChain == 2)
+                {
+                    var plain = wrapped[pos.Line].Line.ToPlainText();
+                    var (ws, we) = WordBoundsAt(plain, pos.Col);
+                    _selAnchor = (pos.Line, ws);
+                    _selCursor = (pos.Line, we);
+                }
+                else if (e.ClickChain >= 3)
+                {
+                    var plain = wrapped[pos.Line].Line.ToPlainText();
+                    _selAnchor = (pos.Line, 0);
+                    _selCursor = (pos.Line, plain.Length);
+                }
+                else if ((e.Modifiers & ConsoleModifiers.Shift) != 0 && _selAnchor is not null)
+                {
+                    _selCursor = pos;
+                }
+                else
+                {
+                    _selAnchor = pos;
+                    _selCursor = pos;
+                }
+
+                _invalidated.OnNext(Unit.Default);
+                return true;
+            }
+
+            case MouseEventKind.Drag:
+            {
+                _selAnchor ??= _pressPos ?? ScreenToPosition(localColumn, localRow, wrapped);
+                _selCursor = ScreenToPosition(localColumn, localRow, wrapped);
+
+                // Auto-scroll when the drag leaves the viewport vertically.
+                if (localRow < 0)
+                    ScrollUp(1, width);
+                else if (localRow >= _lastViewportHeight)
+                    ScrollDown(1);
+
+                _invalidated.OnNext(Unit.Default);
+                return true;
+            }
+
+            case MouseEventKind.Up:
+            {
+                // A click on a link activates it. We key off "no resulting selection" rather than
+                // "no drag occurred" because a real click frequently includes sub-cell jitter that
+                // the terminal reports as a same-cell drag (especially with ?1003h hover on). A
+                // genuine drag-select produces a non-empty selection, which suppresses activation.
+                if (_pressWasSingleClick && !HasSelection && _pressPos is { } pp)
+                {
+                    var url = LinkAt(pp, wrapped);
+                    if (!string.IsNullOrEmpty(url))
+                    {
+                        _selAnchor = null;
+                        _selCursor = null;
+                        _linkActivated.OnNext(url);
+                        _invalidated.OnNext(Unit.Default);
+                        return true;
+                    }
+                }
+
+                if (HasSelection)
+                    _selectionCompleted.OnNext(SelectedText);
+                return true;
+            }
+
+            case MouseEventKind.Move:
+            {
+                UpdateHoveredLink(localColumn, localRow, wrapped);
+                return false;
+            }
+
+            default:
+                return false;
+        }
+    }
+
+    private void UpdateHoveredLink(int localColumn, int localRow, List<(StyledLine Line, int LogicalIndex)> wrapped)
+    {
+        string? url = null;
+        if (localRow >= 0 && localRow < _lastViewportHeight)
+        {
+            var pos = ScreenToPosition(localColumn, localRow, wrapped);
+            url = LinkAt(pos, wrapped);
+        }
+
+        if (url == _hoveredUrl)
+            return;
+
+        _hoveredUrl = url;
+        _hoveredLink.OnNext(url);
+        _invalidated.OnNext(Unit.Default);
+    }
+
+    /// <inheritdoc />
+    public void OnMouseEnter() { }
+
+    /// <inheritdoc />
+    public void OnMouseLeave()
+    {
+        if (_hoveredUrl is null)
+            return;
+        _hoveredUrl = null;
+        _hoveredLink.OnNext(null);
+        _invalidated.OnNext(Unit.Default);
+    }
+
+    private string BuildSelectedText()
+    {
+        var (min, max) = NormalizedSelection();
+        if (min is not { } mn || max is not { } mx || (mn.Line == mx.Line && mn.Col == mx.Col))
+            return string.Empty;
+
+        var wrapped = EnsureWrapped(_lastViewportWidth);
+        if (wrapped.Count == 0)
+            return string.Empty;
+
+        var sb = new StringBuilder();
+        for (var line = mn.Line; line <= mx.Line && line < wrapped.Count; line++)
+        {
+            var plain = wrapped[line].Line.ToPlainText();
+            var start = line == mn.Line ? mn.Col : 0;
+            var end = line == mx.Line ? mx.Col : plain.Length;
+            start = Math.Clamp(start, 0, plain.Length);
+            end = Math.Clamp(end, 0, plain.Length);
+            if (end < start)
+                end = start;
+
+            if (line > mn.Line)
+            {
+                // Newline only when crossing a logical-line boundary, so soft-wrapped fragments rejoin.
+                if (wrapped[line].LogicalIndex != wrapped[line - 1].LogicalIndex)
+                    sb.Append('\n');
+            }
+
+            sb.Append(plain, start, end - start);
+        }
+
+        return sb.ToString();
+    }
+
     /// <inheritdoc />
     public override void Dispose()
     {
@@ -755,6 +1172,12 @@ public sealed class StreamingTextNode : LayoutNode, IInvalidatingNode, IScrollab
 
         _invalidated.OnCompleted();
         _invalidated.Dispose();
+        _linkActivated.OnCompleted();
+        _linkActivated.Dispose();
+        _hoveredLink.OnCompleted();
+        _hoveredLink.Dispose();
+        _selectionCompleted.OnCompleted();
+        _selectionCompleted.Dispose();
         base.Dispose();
     }
 }

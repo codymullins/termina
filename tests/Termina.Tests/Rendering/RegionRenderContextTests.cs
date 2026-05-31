@@ -35,6 +35,18 @@ public class RegionRenderContextTests
     }
 
     [Fact]
+    public void WriteAt_ClipsToRegionWidthWithoutSplittingWideGrapheme()
+    {
+        var terminal = new VirtualTerminal(80, 24);
+        var context = new RegionRenderContext(terminal, 0, 0, 3, 1);
+
+        context.WriteAt(0, 0, "🖼X");
+
+        Assert.Equal("🖼X", terminal.GetLine(0));
+        Assert.Equal('X', terminal.GetChar(2, 0));
+    }
+
+    [Fact]
     public void WriteAt_ClipsStartingOutsideRegion()
     {
         var terminal = new VirtualTerminal(80, 24);
@@ -44,6 +56,17 @@ public class RegionRenderContextTests
 
         // First 2 chars skipped, "llo" written starting at 0
         Assert.Equal("llo", terminal.GetRegion(0, 0, 3, 1));
+    }
+
+    [Fact]
+    public void WriteAt_ClipsNegativeStartByDisplayWidth()
+    {
+        var terminal = new VirtualTerminal(80, 24);
+        var context = new RegionRenderContext(terminal, 0, 0, 10, 1);
+
+        context.WriteAt(-2, 0, "🖼HTML");
+
+        Assert.Equal("HTML", terminal.GetLine(0));
     }
 
     [Fact]

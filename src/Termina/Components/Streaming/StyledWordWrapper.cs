@@ -173,37 +173,20 @@ public static class StyledWordWrapper
 
         foreach (var segment in line.Segments)
         {
-            var currentSegmentStart = 0;
-
-            for (var i = 0; i < segment.Length; i++)
+            foreach (var grapheme in TerminalText.EnumerateGraphemes(segment.Text))
             {
-                var c = segment.Text[i];
-
-                if (char.IsWhiteSpace(c))
+                if (grapheme.Text.Length > 0 && char.IsWhiteSpace(grapheme.Text, 0))
                 {
-                    // Flush any accumulated text from this segment to current word
-                    if (i > currentSegmentStart)
-                    {
-                        var text = segment.Text.Substring(currentSegmentStart, i - currentSegmentStart);
-                        currentWord.Append(new StyledSegment(text, segment.Style));
-                    }
-
                     // If we have a word, add it to results
                     if (!currentWord.IsEmpty)
                     {
                         words.Add(currentWord);
                         currentWord = new StyledLine();
                     }
-
-                    currentSegmentStart = i + 1;
+                    continue;
                 }
-            }
 
-            // Flush remaining text from this segment
-            if (currentSegmentStart < segment.Length)
-            {
-                var text = segment.Text.Substring(currentSegmentStart);
-                currentWord.Append(new StyledSegment(text, segment.Style));
+                currentWord.Append(new StyledSegment(grapheme.Text, segment.Style));
             }
         }
 

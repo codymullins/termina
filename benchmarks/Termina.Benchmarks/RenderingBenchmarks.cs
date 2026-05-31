@@ -216,9 +216,11 @@ internal sealed class BenchmarkTerminal : IAnsiTerminal
     public void MoveTo(int x, int y) { }
     public void Write(string text) { }
     public void Write(char c) { }
+    public void WriteControlAt(int x, int y, string sequence) { }
     public void SetForeground(Color color) { }
     public void SetBackground(Color color) { }
     public void ResetColors() { }
+    public void SetDecoration(TextDecoration decoration) { }
     public void SaveCursor() { }
     public void RestoreCursor() { }
     public void SetCursorVisible(bool visible) { }
@@ -229,6 +231,9 @@ internal sealed class BenchmarkTerminal : IAnsiTerminal
     public void ExitAlternateScreen() { }
     public void EnableMouse() { }
     public void DisableMouse() { }
+    public void SetMouseMode(MouseMode mode) { }
+    public void DisableAllMouseTracking() { }
+    public void SetLink(string? uri) { }
     public void EnableWheelScroll() { }
     public void DisableWheelScroll() { }
     public void CopyToClipboard(string text) { }

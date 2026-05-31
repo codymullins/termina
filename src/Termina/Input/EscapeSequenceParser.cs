@@ -18,9 +18,8 @@ namespace Termina.Input;
 /// </para>
 /// <list type="bullet">
 ///   <item><description>Bracketed paste: <c>ESC[200~</c>…content…<c>ESC[201~</c> → <see cref="PasteEvent"/></description></item>
-///   <item><description>SGR mouse scroll up: <c>ESC[&lt;64;x;yM</c> → <see cref="MouseScrollEvent"/>(<c>+1</c>)</description></item>
-///   <item><description>SGR mouse scroll down: <c>ESC[&lt;65;x;yM</c> → <see cref="MouseScrollEvent"/>(<c>-1</c>)</description></item>
-///   <item><description>Other SGR mouse events (clicks, releases): silently consumed — prevents spurious <c>ESC</c> keypresses.</description></item>
+///   <item><description>SGR mouse events: <c>ESC[&lt;button;x;y(M|m)</c> → <see cref="MouseEvent"/> (press/release/drag/move, with modifiers and extended buttons decoded). Wheel events also emit a legacy <see cref="MouseScrollEvent"/>.</description></item>
+///   <item><description>Focus tracking: <c>ESC[I</c> / <c>ESC[O</c> → <see cref="TerminalFocusEvent"/> (consumed so it never leaks as input).</description></item>
 ///   <item><description>CSI u (kitty keyboard protocol): <c>ESC[keycode;modifiersu</c> → <see cref="KeyPressed"/> with correct modifiers.</description></item>
 ///   <item><description>CSI arrow under xterm alternate-scroll mode: <c>ESC[A</c> / <c>ESC[B</c> → <see cref="MouseScrollEvent"/>.</description></item>
 ///   <item><description>SS3 arrow / function key: <c>ESC O A/B/C/D/H/F/P-S</c> → <see cref="KeyPressed"/> (arrows, Home/End, F1-F4).</description></item>
@@ -187,6 +186,16 @@ internal sealed class EscapeSequenceParser
                     _pendingEndSeqPos = 0;
                     _state = State.PasteBuffering;
                     TerminaTrace.Input.Debug(this, "ESP: Paste start detected → PasteBuffering");
+                    break;
+                }
+
+                // Focus tracking (CSI ?1004h): ESC[I = focus gained, ESC[O = focus lost.
+                if (seq == "[I" || seq == "[O")
+                {
+                    TerminaTrace.Input.Debug(this, "ESP: focus {0}", seq == "[I" ? "in" : "out");
+                    results.Add(new TerminalFocusEvent(seq == "[I"));
+                    _seqBuffer.Clear();
+                    _state = State.Normal;
                     break;
                 }
 
@@ -580,27 +589,111 @@ internal sealed class EscapeSequenceParser
     };
 
     /// <summary>
-    /// Parses an SGR mouse sequence and appends a <see cref="MouseScrollEvent"/> to <paramref name="results"/>
-    /// when the button code indicates a scroll event (64 = up, 65 = down).
-    /// Other mouse events (clicks, releases) are silently consumed — no event is appended.
+    /// Whether the terminal is currently reporting mouse coordinates in pixels (CSI ?1016h) rather
+    /// than cells. When set, the raw coordinates are surfaced on <see cref="MouseEvent.PixelX"/> /
+    /// <see cref="MouseEvent.PixelY"/>; consumers convert to cells using the terminal's font metrics.
     /// </summary>
-    /// <param name="seq">The buffered sequence string, e.g. <c>[&lt;64;5;10M</c>.</param>
-    /// <param name="results">List to append events into.</param>
-    private static void EmitMouseSgrEvent(string seq, List<IInputEvent> results)
-    {
-        // seq = "[<button;x;yM" or "[<button;x;ym"
-        // Strip leading "[<" and trailing terminator char
-        if (seq.Length < 3) return;
-        var inner = seq[2..^1]; // "button;x;y"
-        var semicolon = inner.IndexOf(';');
-        if (semicolon < 0) return;
-        if (!int.TryParse(inner[..semicolon], out var button)) return;
+    public bool PixelReporting { get; set; }
 
-        // SGR button 64 = wheel up, 65 = wheel down
-        if (button == 64)
+    /// <summary>
+    /// Fully decodes an SGR mouse sequence and appends a rich <see cref="MouseEvent"/> to
+    /// <paramref name="results"/>. Wheel events additionally append a legacy
+    /// <see cref="MouseScrollEvent"/> so focused scrollables keep working unchanged.
+    /// </summary>
+    /// <param name="seq">The buffered sequence string, e.g. <c>[&lt;0;5;10M</c> (press) or <c>...m</c> (release).</param>
+    /// <param name="results">List to append events into.</param>
+    private void EmitMouseSgrEvent(string seq, List<IInputEvent> results)
+    {
+        // seq = "[<button;x;y" + terminator ('M' = press, 'm' = release).
+        if (seq.Length < 3) return;
+        var terminator = seq[^1];
+        var isRelease = terminator == 'm';
+
+        var inner = seq[2..^1]; // "button;x;y"
+        var first = inner.IndexOf(';');
+        if (first < 0) return;
+        var second = inner.IndexOf(';', first + 1);
+        if (second < 0) return;
+
+        // Coordinates may legally be negative during drag-out and in pixel mode.
+        if (!int.TryParse(inner[..first], out var button)) return;
+        if (!int.TryParse(inner[(first + 1)..second], out var rawX)) return;
+        if (!int.TryParse(inner[(second + 1)..], out var rawY)) return;
+
+        var isWheel = (button & 0x40) != 0;
+        var isExtended = (button & 0x80) != 0;
+        var isMotion = (button & 0x20) != 0;
+        var low2 = button & 0b11;
+
+        var modifiers = (ConsoleModifiers)0;
+        if ((button & 0x04) != 0) modifiers |= ConsoleModifiers.Shift;
+        if ((button & 0x08) != 0) modifiers |= ConsoleModifiers.Alt;
+        if ((button & 0x10) != 0) modifiers |= ConsoleModifiers.Control;
+
+        // Wire coordinates are 1-based cells (or pixels under ?1016h). Convert to 0-based.
+        int column, row, pixelX = -1, pixelY = -1;
+        if (PixelReporting)
+        {
+            pixelX = rawX;
+            pixelY = rawY;
+            column = rawX; // caller divides by cell width using terminal font metrics
+            row = rawY;
+        }
+        else
+        {
+            column = rawX - 1;
+            row = rawY - 1;
+        }
+
+        MouseButton mouseButton;
+        MouseEventKind kind;
+
+        if (isWheel)
+        {
+            mouseButton = MouseButton.None;
+            kind = low2 switch
+            {
+                0 => MouseEventKind.ScrollUp,
+                1 => MouseEventKind.ScrollDown,
+                2 => MouseEventKind.ScrollLeft,
+                _ => MouseEventKind.ScrollRight,
+            };
+        }
+        else if (isExtended)
+        {
+            mouseButton = low2 switch
+            {
+                0 => MouseButton.Back,
+                1 => MouseButton.Forward,
+                _ => MouseButton.None,
+            };
+            kind = isMotion
+                ? (mouseButton == MouseButton.None ? MouseEventKind.Move : MouseEventKind.Drag)
+                : (isRelease ? MouseEventKind.Up : MouseEventKind.Down);
+        }
+        else
+        {
+            // low2: 0=Left, 1=Middle, 2=Right, 3=no-button (motion with nothing held).
+            mouseButton = low2 switch
+            {
+                0 => MouseButton.Left,
+                1 => MouseButton.Middle,
+                2 => MouseButton.Right,
+                _ => MouseButton.None,
+            };
+
+            if (isMotion)
+                kind = mouseButton == MouseButton.None ? MouseEventKind.Move : MouseEventKind.Drag;
+            else
+                kind = isRelease ? MouseEventKind.Up : MouseEventKind.Down;
+        }
+
+        results.Add(new MouseEvent(column, row, mouseButton, kind, modifiers, ClickChain: 1, pixelX, pixelY));
+
+        // Preserve the legacy scroll path for focused IScrollable components.
+        if (kind == MouseEventKind.ScrollUp)
             results.Add(new MouseScrollEvent(+1));
-        else if (button == 65)
+        else if (kind == MouseEventKind.ScrollDown)
             results.Add(new MouseScrollEvent(-1));
-        // All other buttons (clicks, releases, drags) are silently consumed
     }
 }

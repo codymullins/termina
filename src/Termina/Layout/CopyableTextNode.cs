@@ -1,6 +1,7 @@
 using R3;
 using Termina.Clipboard;
 using Termina.Diagnostics;
+using Termina.Input;
 using Termina.Notifications;
 using Termina.Rendering;
 using Termina.Terminal;
@@ -10,8 +11,10 @@ namespace Termina.Layout;
 /// <summary>
 /// A focusable read-only text node that copies its full content when Enter is pressed.
 /// </summary>
-public sealed class CopyableTextNode : LayoutNode, IFocusable, IInvalidatingNode
+public sealed class CopyableTextNode : LayoutNode, IFocusable, IInvalidatingNode, IMouseAware
 {
+    private int _mouseAnchor = -1;
+    private int _lastWidth = 1;
     private readonly IClipboardService _clipboardService;
     private readonly IToastService? _toastService;
     private readonly Subject<Unit> _invalidated = new();
@@ -220,6 +223,9 @@ public sealed class CopyableTextNode : LayoutNode, IFocusable, IInvalidatingNode
         if (!bounds.HasArea)
             return;
 
+        context.RegisterHit(this, bounds, HitTestKind.Text);
+        _lastWidth = bounds.Width;
+
         var nodeContext = context.CreateSubContext(bounds);
         var lines = BuildRenderedLines(bounds.Width);
         var hasHint = !string.IsNullOrWhiteSpace(Hint);
@@ -336,6 +342,93 @@ public sealed class CopyableTextNode : LayoutNode, IFocusable, IInvalidatingNode
     {
         _selectionStart = 0;
         _cursorPosition = Content.Length;
+    }
+
+    /// <summary>
+    /// Maps a click at (localColumn, localRow) within the node to a character index into Content.
+    /// </summary>
+    private int PositionToIndex(int localColumn, int localRow)
+    {
+        var lines = BuildRenderedLines(Math.Max(1, _lastWidth));
+        if (lines.Count == 0)
+            return 0;
+
+        var row = Math.Clamp(localRow, 0, lines.Count - 1);
+        var line = lines[row];
+        var col = Math.Clamp(localColumn, 0, line.Text.Length);
+        return Math.Clamp(line.StartIndex + col, 0, Content.Length);
+    }
+
+    private (int Start, int End) WordBoundsAt(int pos)
+    {
+        pos = Math.Clamp(pos, 0, Content.Length);
+        var start = pos;
+        while (start > 0 && !char.IsWhiteSpace(Content[start - 1]))
+            start--;
+        var end = pos;
+        while (end < Content.Length && !char.IsWhiteSpace(Content[end]))
+            end++;
+        return (start, end);
+    }
+
+    /// <inheritdoc />
+    public bool HandleMouse(MouseEvent e, Rect bounds)
+    {
+        if (e.Button != MouseButton.Left && e.Kind != MouseEventKind.Drag)
+            return false;
+
+        var localColumn = e.Column - bounds.X;
+        var localRow = e.Row - bounds.Y;
+
+        switch (e.Kind)
+        {
+            case MouseEventKind.Down:
+            {
+                var pos = PositionToIndex(localColumn, localRow);
+                if (e.ClickChain >= 3)
+                {
+                    _selectionStart = 0;
+                    _cursorPosition = Content.Length;
+                    _mouseAnchor = 0;
+                }
+                else if (e.ClickChain == 2)
+                {
+                    var (ws, we) = WordBoundsAt(pos);
+                    _selectionStart = ws;
+                    _cursorPosition = we;
+                    _mouseAnchor = ws;
+                }
+                else if ((e.Modifiers & ConsoleModifiers.Shift) != 0)
+                {
+                    if (_selectionStart < 0)
+                        _selectionStart = _cursorPosition;
+                    _cursorPosition = pos;
+                    _mouseAnchor = _selectionStart;
+                }
+                else
+                {
+                    _cursorPosition = pos;
+                    _selectionStart = -1;
+                    _mouseAnchor = pos;
+                }
+                Invalidate();
+                return true;
+            }
+
+            case MouseEventKind.Drag:
+                if (_mouseAnchor < 0)
+                    _mouseAnchor = _cursorPosition;
+                _selectionStart = _mouseAnchor;
+                _cursorPosition = PositionToIndex(localColumn, localRow);
+                Invalidate();
+                return true;
+
+            case MouseEventKind.Up:
+                return true;
+
+            default:
+                return false;
+        }
     }
 
     private void UpdateSelectionForMove(ConsoleModifiers modifiers, int newPosition)

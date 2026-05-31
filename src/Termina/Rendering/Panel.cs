@@ -219,6 +219,13 @@ public sealed class Panel : IRenderable
             _parent.WriteAt(x + _offsetX, y + _offsetY, c);
         }
 
+        public void WriteControlAt(int x, int y, string sequence)
+        {
+            if (x < 0 || x >= Width || y < 0 || y >= Height)
+                return;
+            _parent.WriteControlAt(x + _offsetX, y + _offsetY, sequence);
+        }
+
         public void SetForeground(Color color) => _parent.SetForeground(color);
         public void SetBackground(Color color) => _parent.SetBackground(color);
         public void ResetColors() => _parent.ResetColors();
@@ -255,5 +262,17 @@ public sealed class Panel : IRenderable
                 clippedWidth,
                 clippedHeight);
         }
+
+        public void RegisterHit(object node, Layout.Rect bounds, HitTestKind kind)
+        {
+            // Translate into the parent's coordinate space; the root context applies the final
+            // absolute offset.
+            _parent.RegisterHit(
+                node,
+                new Layout.Rect(bounds.X + _offsetX, bounds.Y + _offsetY, bounds.Width, bounds.Height),
+                kind);
+        }
+
+        public void SetLink(string? uri) => _parent.SetLink(uri);
     }
 }

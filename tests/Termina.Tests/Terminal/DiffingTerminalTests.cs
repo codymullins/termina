@@ -2,6 +2,7 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 using Termina.Terminal;
+using Termina.Rendering;
 
 namespace Termina.Tests.Terminal;
 
@@ -192,6 +193,37 @@ public class DiffingTerminalTests
         // Verify the background color was applied by checking cell colors
         Assert.Equal(Color.Blue, inner.GetBackground(0, 0));
         Assert.Equal(Color.Blue, inner.GetBackground(1, 0));
+    }
+
+    [Fact]
+    public void RegionRenderContext_Decoration_DoesNotWriteAnsiBytesAsCells()
+    {
+        var inner = new VirtualTerminal(20, 5);
+        var diffing = new DiffingTerminal(inner);
+        var context = new RegionRenderContext(diffing, 0, 0, 20, 5);
+
+        context.SetDecoration(TextDecoration.Bold);
+        context.WriteAt(0, 0, "X");
+        diffing.Flush();
+
+        Assert.Equal('X', inner.GetChar(0, 0));
+        Assert.Equal(' ', inner.GetChar(1, 0));
+        Assert.Equal(TextDecoration.Bold, inner.GetDecoration(0, 0));
+        Assert.Equal(TextDecoration.None, inner.GetDecoration(1, 0));
+    }
+
+    [Fact]
+    public void Flush_WideGrapheme_KeepsFollowingTextInCorrectColumn()
+    {
+        var inner = new VirtualTerminal(10, 2);
+        var diffing = new DiffingTerminal(inner);
+
+        diffing.MoveTo(0, 0);
+        diffing.Write("🖼X");
+        diffing.Flush();
+
+        Assert.Equal("🖼X", inner.GetLine(0));
+        Assert.Equal('X', inner.GetChar(2, 0));
     }
 
     [Fact]

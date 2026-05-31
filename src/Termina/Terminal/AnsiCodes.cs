@@ -292,6 +292,19 @@ public static class AnsiCodes
             : $"\x1b]52;c;{base64}\x07";
     }
 
+    // Hyperlinks (OSC 8)
+
+    /// <summary>
+    /// Begin an OSC 8 hyperlink. Cells written after this carry the link until
+    /// <see cref="HyperlinkEnd"/> is emitted. Format: OSC 8 ; ; {uri} ST
+    /// </summary>
+    public static string Hyperlink(string uri) => $"\x1b]8;;{uri}\x1b\\";
+
+    /// <summary>
+    /// End the current OSC 8 hyperlink. Format: OSC 8 ; ; ST
+    /// </summary>
+    public const string HyperlinkEnd = "\x1b]8;;\x1b\\";
+
     // Mouse tracking
 
     /// <summary>
@@ -323,6 +336,61 @@ public static class AnsiCodes
     /// Disable mouse tracking (SGR extended mode). Format: CSI ?1006l
     /// </summary>
     public const string DisableMouseSgr = $"{Csi}?1006l";
+
+    /// <summary>
+    /// Enable button-event mouse tracking (xterm 1002). Reports motion only while a button is
+    /// held (drag), in addition to the press/release events from <see cref="EnableMouseNormal"/>.
+    /// Format: CSI ?1002h
+    /// </summary>
+    public const string EnableMouseButtonEvent = $"{Csi}?1002h";
+
+    /// <summary>
+    /// Disable button-event mouse tracking. Format: CSI ?1002l
+    /// </summary>
+    public const string DisableMouseButtonEvent = $"{Csi}?1002l";
+
+    /// <summary>
+    /// Enable any-event mouse tracking (xterm 1003). Reports every cell the cursor crosses even
+    /// with no button held — required for hover. Floods stdin during normal cursor motion, so it
+    /// should only be enabled when an application actually needs hover. Format: CSI ?1003h
+    /// </summary>
+    public const string EnableMouseAnyEvent = $"{Csi}?1003h";
+
+    /// <summary>
+    /// Disable any-event mouse tracking. Format: CSI ?1003l
+    /// </summary>
+    public const string DisableMouseAnyEvent = $"{Csi}?1003l";
+
+    /// <summary>
+    /// Enable focus tracking (xterm 1004). The terminal sends <c>CSI I</c> when it gains focus
+    /// and <c>CSI O</c> when it loses focus. Must be consumed or it leaks as input. Format: CSI ?1004h
+    /// </summary>
+    public const string EnableFocusTracking = $"{Csi}?1004h";
+
+    /// <summary>
+    /// Disable focus tracking. Format: CSI ?1004l
+    /// </summary>
+    public const string DisableFocusTracking = $"{Csi}?1004l";
+
+    /// <summary>
+    /// Enable SGR pixel-resolution mouse reporting (xterm 1016). Coordinates are reported in
+    /// pixels rather than cells, enabling sub-cell positioning. Should only be enabled after a
+    /// DECRQM probe confirms support — coordinates may be negative when the cursor leaves the
+    /// window. Format: CSI ?1016h
+    /// </summary>
+    public const string EnableMousePixels = $"{Csi}?1016h";
+
+    /// <summary>
+    /// Disable SGR pixel-resolution mouse reporting. Format: CSI ?1016l
+    /// </summary>
+    public const string DisableMousePixels = $"{Csi}?1016l";
+
+    /// <summary>
+    /// Request the current state of a DEC private mode (DECRQM). The terminal replies with
+    /// <c>CSI ? {mode} ; {status} $ y</c> where status 1 = set, 2 = reset, 0 = unrecognised,
+    /// 3 = permanently set, 4 = permanently reset. Format: CSI ? {mode} $ p
+    /// </summary>
+    public static string RequestMode(int mode) => $"{Csi}?{mode}$p";
 
     /// <summary>
     /// Enable alternate scroll mode (xterm 1007). While the alternate screen buffer is active,
