@@ -304,6 +304,8 @@ public sealed class TextAreaNode : TextInputBaseNode
         if (!bounds.HasArea)
             return;
 
+        context.RegisterHit(this, bounds, HitTestKind.Text);
+
         var inputContext = context.CreateSubContext(bounds);
         _lastKnownWidth = bounds.Width;
 
@@ -469,6 +471,19 @@ public sealed class TextAreaNode : TextInputBaseNode
     {
         var prefixLen = CommittedDisplayPrefix.Length;
         return Math.Clamp(displayPos - prefixLen, 0, _text.Length);
+    }
+
+    /// <inheritdoc />
+    protected override int PositionToCursor(int localColumn, int localRow)
+    {
+        var lines = GetWrappedLines(EffectiveWidth);
+        if (lines.Count == 0)
+            return 0;
+
+        var lineIndex = Math.Clamp(_scrollTopLine + localRow, 0, lines.Count - 1);
+        var line = lines[lineIndex];
+        var col = Math.Clamp(localColumn, 0, line.Length);
+        return DisplayToTextPosition(line.TextStartIndex + col);
     }
 
     /// <summary>

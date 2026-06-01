@@ -39,6 +39,11 @@ public interface IRenderContext
     void WriteAt(int x, int y, char c);
 
     /// <summary>
+    /// Write a terminal control sequence at the specified position without treating it as text.
+    /// </summary>
+    void WriteControlAt(int x, int y, string sequence);
+
+    /// <summary>
     /// Set the foreground color for subsequent writes.
     /// </summary>
     /// <param name="color">The foreground color.</param>
@@ -89,4 +94,27 @@ public interface IRenderContext
     /// <param name="bounds">The bounds for the sub-context relative to this context.</param>
     /// <returns>A new render context clipped to the specified bounds.</returns>
     IRenderContext CreateSubContext(Layout.Rect bounds);
+
+    /// <summary>
+    /// Records a node's bounds in the frame's hit-test index so mouse events can be routed back to
+    /// it. <paramref name="bounds"/> is relative to this context; the context translates it to
+    /// absolute screen coordinates. A no-op when no hit-test index is attached (e.g. in tests).
+    /// </summary>
+    /// <param name="node">The node to associate with the region.</param>
+    /// <param name="bounds">The node's bounds, relative to this context.</param>
+    /// <param name="kind">How the region should be classified for dispatch.</param>
+    void RegisterHit(object node, Layout.Rect bounds, HitTestKind kind)
+    {
+        // Default no-op so existing IRenderContext implementations need no changes.
+    }
+
+    /// <summary>
+    /// Sets the hyperlink (OSC 8) applied to subsequent writes, or <c>null</c> to clear it. Ambient
+    /// state mirroring the style setters; text written while a link is set becomes a clickable
+    /// terminal hyperlink. Default no-op for contexts that do not support links.
+    /// </summary>
+    void SetLink(string? uri)
+    {
+        // Default no-op.
+    }
 }

@@ -67,13 +67,16 @@ public class EscapeSequenceParserTests
     // --- Mouse scroll up (button 64) ---
 
     [Fact]
-    public void SgrScrollUp_EmitsMouseScrollEventPositive()
+    public void SgrScrollUp_EmitsMouseEventAndLegacyScroll()
     {
         var parser = new EscapeSequenceParser();
         var events = FeedSequence(parser, SgrMouseSequence(64, 5, 10));
 
-        var scroll = Assert.Single(events);
-        var mse = Assert.IsType<MouseScrollEvent>(scroll);
+        var mouse = Assert.IsType<MouseEvent>(events[0]);
+        Assert.Equal(MouseEventKind.ScrollUp, mouse.Kind);
+        Assert.Equal(4, mouse.Column); // 1-based wire coord 5 -> 0-based 4
+        Assert.Equal(9, mouse.Row);
+        var mse = Assert.IsType<MouseScrollEvent>(events[1]);
         Assert.Equal(+1, mse.Delta);
     }
 
@@ -83,21 +86,21 @@ public class EscapeSequenceParserTests
         var parser = new EscapeSequenceParser();
         var events = FeedSequence(parser, SgrMouseSequence(64, 200, 50));
 
-        var scroll = Assert.Single(events);
-        Assert.IsType<MouseScrollEvent>(scroll);
-        Assert.Equal(+1, ((MouseScrollEvent)scroll).Delta);
+        var mse = Assert.IsType<MouseScrollEvent>(events[^1]);
+        Assert.Equal(+1, mse.Delta);
     }
 
     // --- Mouse scroll down (button 65) ---
 
     [Fact]
-    public void SgrScrollDown_EmitsMouseScrollEventNegative()
+    public void SgrScrollDown_EmitsMouseEventAndLegacyScroll()
     {
         var parser = new EscapeSequenceParser();
         var events = FeedSequence(parser, SgrMouseSequence(65, 5, 10));
 
-        var scroll = Assert.Single(events);
-        var mse = Assert.IsType<MouseScrollEvent>(scroll);
+        var mouse = Assert.IsType<MouseEvent>(events[0]);
+        Assert.Equal(MouseEventKind.ScrollDown, mouse.Kind);
+        var mse = Assert.IsType<MouseScrollEvent>(events[1]);
         Assert.Equal(-1, mse.Delta);
     }
 
@@ -150,53 +153,121 @@ public class EscapeSequenceParserTests
     }
 
     [Fact]
-    public void SgrMouseClickPress_IsSilentlyConsumed()
+    public void SgrMouseClickPress_EmitsLeftDown()
     {
         var parser = new EscapeSequenceParser();
         // Button 0 + 'M' = left button press
-        var events = FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'M'));
-        Assert.Empty(events);
+        var ev = Assert.Single(FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'M')));
+        var mouse = Assert.IsType<MouseEvent>(ev);
+        Assert.Equal(MouseEventKind.Down, mouse.Kind);
+        Assert.Equal(MouseButton.Left, mouse.Button);
+        Assert.Equal(4, mouse.Column);
+        Assert.Equal(9, mouse.Row);
     }
 
     [Fact]
-    public void SgrMouseClickRelease_IsSilentlyConsumed()
+    public void SgrMouseClickRelease_EmitsLeftUp()
     {
         var parser = new EscapeSequenceParser();
         // Button 0 + 'm' = left button release
-        var events = FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'm'));
-        Assert.Empty(events);
+        var ev = Assert.Single(FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'm')));
+        var mouse = Assert.IsType<MouseEvent>(ev);
+        Assert.Equal(MouseEventKind.Up, mouse.Kind);
+        Assert.Equal(MouseButton.Left, mouse.Button);
     }
 
     [Fact]
-    public void SgrMouseRightClick_IsSilentlyConsumed()
+    public void SgrMouseRightClick_EmitsRightDown()
     {
         var parser = new EscapeSequenceParser();
-        var events = FeedSequence(parser, SgrMouseSequence(2, 10, 20, 'M'));
-        Assert.Empty(events);
+        var ev = Assert.Single(FeedSequence(parser, SgrMouseSequence(2, 10, 20, 'M')));
+        var mouse = Assert.IsType<MouseEvent>(ev);
+        Assert.Equal(MouseEventKind.Down, mouse.Kind);
+        Assert.Equal(MouseButton.Right, mouse.Button);
     }
 
     [Fact]
-    public void MultipleClicks_AllSilentlyConsumed()
+    public void SgrMouseDrag_EmitsDragWithButton()
+    {
+        var parser = new EscapeSequenceParser();
+        // Button 0 + motion bit (0x20 = 32) = left-drag.
+        var ev = Assert.Single(FeedSequence(parser, SgrMouseSequence(32, 5, 10, 'M')));
+        var mouse = Assert.IsType<MouseEvent>(ev);
+        Assert.Equal(MouseEventKind.Drag, mouse.Kind);
+        Assert.Equal(MouseButton.Left, mouse.Button);
+    }
+
+    [Fact]
+    public void SgrMouseMove_NoButton_EmitsMove()
+    {
+        var parser = new EscapeSequenceParser();
+        // Motion bit set, low2 = 3 (no button) -> 32 + 3 = 35.
+        var ev = Assert.Single(FeedSequence(parser, SgrMouseSequence(35, 5, 10, 'M')));
+        var mouse = Assert.IsType<MouseEvent>(ev);
+        Assert.Equal(MouseEventKind.Move, mouse.Kind);
+        Assert.Equal(MouseButton.None, mouse.Button);
+    }
+
+    [Fact]
+    public void SgrMouse_ModifiersDecoded()
+    {
+        var parser = new EscapeSequenceParser();
+        // Left press with Ctrl (0x10=16) + Shift (0x04=4) = 20.
+        var ev = Assert.Single(FeedSequence(parser, SgrMouseSequence(20, 5, 10, 'M')));
+        var mouse = Assert.IsType<MouseEvent>(ev);
+        Assert.True(mouse.Modifiers.HasFlag(ConsoleModifiers.Control));
+        Assert.True(mouse.Modifiers.HasFlag(ConsoleModifiers.Shift));
+    }
+
+    [Fact]
+    public void SgrMouse_NegativeCoordinates_AreParsed()
+    {
+        var parser = new EscapeSequenceParser();
+        // Drag-out can report negative coordinates.
+        var ev = Assert.Single(FeedSequence(parser, SgrMouseSequence(32, -3, 7, 'M')));
+        var mouse = Assert.IsType<MouseEvent>(ev);
+        Assert.Equal(-4, mouse.Column); // -3 wire -> -4 (0-based)
+        Assert.Equal(6, mouse.Row);
+    }
+
+    [Fact]
+    public void MultipleClicks_EachEmitsMouseEvent()
     {
         var parser = new EscapeSequenceParser();
         var events = new List<IInputEvent>();
-        // Press + release
         events.AddRange(FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'M')));
         events.AddRange(FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'm')));
-        Assert.Empty(events);
+        Assert.Equal(2, events.Count);
+        Assert.Equal(MouseEventKind.Down, ((MouseEvent)events[0]).Kind);
+        Assert.Equal(MouseEventKind.Up, ((MouseEvent)events[1]).Kind);
     }
 
     [Fact]
-    public void ClickThenScroll_ClickConsumed_ScrollEmitted()
+    public void ClickThenScroll_BothEmitted()
     {
         var parser = new EscapeSequenceParser();
         var events = new List<IInputEvent>();
-        events.AddRange(FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'M'))); // click
-        events.AddRange(FeedSequence(parser, SgrMouseSequence(64, 5, 10)));      // scroll up
+        events.AddRange(FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'M'))); // click -> MouseEvent
+        events.AddRange(FeedSequence(parser, SgrMouseSequence(64, 5, 10)));      // scroll up -> MouseEvent + MouseScrollEvent
 
-        var single = Assert.Single(events);
-        var mse = Assert.IsType<MouseScrollEvent>(single);
-        Assert.Equal(+1, mse.Delta);
+        Assert.Equal(MouseEventKind.Down, ((MouseEvent)events[0]).Kind);
+        Assert.Contains(events, e => e is MouseScrollEvent { Delta: +1 });
+    }
+
+    [Fact]
+    public void FocusIn_EmitsTerminalFocusEvent()
+    {
+        var parser = new EscapeSequenceParser();
+        var ev = Assert.Single(FeedSequence(parser, new[] { EscKey(), Key('['), Key('I') }));
+        Assert.True(Assert.IsType<TerminalFocusEvent>(ev).HasFocus);
+    }
+
+    [Fact]
+    public void FocusOut_EmitsTerminalFocusEvent()
+    {
+        var parser = new EscapeSequenceParser();
+        var ev = Assert.Single(FeedSequence(parser, new[] { EscKey(), Key('['), Key('O') }));
+        Assert.False(Assert.IsType<TerminalFocusEvent>(ev).HasFocus);
     }
 
     // --- Parser state: not buffering after processing a complete sequence ---
@@ -450,20 +521,17 @@ public class EscapeSequenceParserTests
     // --- Normal sequence followed by keys works ---
 
     [Fact]
-    public void AfterConsumedMouseEvent_RegularKeysWorkNormally()
+    public void AfterMouseEvent_RegularKeysWorkNormally()
     {
         var parser = new EscapeSequenceParser();
-        var events = new List<IInputEvent>();
 
-        // Mouse click (consumed)
-        events.AddRange(FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'M')));
-        events.AddRange(FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'm')));
+        // Mouse click (press + release) emits two MouseEvents.
+        FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'M'));
+        FeedSequence(parser, SgrMouseSequence(0, 5, 10, 'm'));
 
-        // Regular key after
-        events.AddRange(parser.Process(Key('a', ConsoleKey.A)));
-
-        var single = Assert.Single(events);
-        Assert.Equal('a', ((KeyPressed)single).KeyInfo.KeyChar);
+        // Regular key after is unaffected.
+        var ev = Assert.Single(parser.Process(Key('a', ConsoleKey.A)));
+        Assert.Equal('a', ((KeyPressed)ev).KeyInfo.KeyChar);
     }
 
     // --- Legacy CSI tilde key sequences ---
@@ -562,8 +630,11 @@ public class EscapeSequenceParserTests
         Assert.Equal(ConsoleKey.PageUp, Assert.IsType<KeyPressed>(Assert.Single(keyEvents)).KeyInfo.Key);
 
         var events = FeedSequence(parser, SgrMouseSequence(64, 5, 10));
-        var scroll = Assert.Single(events);
-        Assert.Equal(+1, Assert.IsType<MouseScrollEvent>(scroll).Delta);
+        // SGR wheel now emits a rich MouseEvent (ScrollUp) plus the legacy MouseScrollEvent that
+        // focused IScrollable components still consume; the regression check is that a scroll is
+        // produced at all (the parser did not stay stuck after the tilde sequence).
+        var scroll = events.OfType<MouseScrollEvent>().Single();
+        Assert.Equal(+1, scroll.Delta);
     }
 
     [Fact]

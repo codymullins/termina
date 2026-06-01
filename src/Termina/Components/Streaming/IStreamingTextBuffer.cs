@@ -114,4 +114,13 @@ public interface IStreamingTextBuffer
     /// Gets all raw styled lines (unwrapped) in the buffer.
     /// </summary>
     IReadOnlyList<StyledLine> GetAllStyledLines();
+
+    /// <summary>
+    /// Returns the absolute index, into the full wrapped-line list at the given width, of the first
+    /// line currently visible at the top of the viewport. Combined with the screen row this lets a
+    /// caller reverse-map a screen position to an absolute wrapped-line position for selection.
+    /// </summary>
+    /// <param name="viewportHeight">Number of lines visible.</param>
+    /// <param name="viewportWidth">Width used for word wrapping.</param>
+    int GetFirstVisibleWrappedIndex(int viewportHeight, int viewportWidth);
 }

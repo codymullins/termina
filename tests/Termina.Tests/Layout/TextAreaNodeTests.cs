@@ -968,6 +968,8 @@ public class TextAreaNodeTests : IDisposable
             }
         }
 
+        public void WriteControlAt(int x, int y, string sequence) { }
+
         public void SetForeground(Color color) { }
         public void SetBackground(Color color) { }
         public void ResetColors() { }
@@ -1010,6 +1012,8 @@ public class TextAreaNodeTests : IDisposable
 
             public void WriteAt(int x, int y, char c) => _parent.WriteAt(_bounds.X + x, _bounds.Y + y, c);
             public void WriteAt(int x, int y, string text) => _parent.WriteAt(_bounds.X + x, _bounds.Y + y, text);
+            public void WriteControlAt(int x, int y, string sequence) =>
+                _parent.WriteControlAt(_bounds.X + x, _bounds.Y + y, sequence);
             public void SetForeground(Color color) => _parent.SetForeground(color);
             public void SetBackground(Color color) => _parent.SetBackground(color);
             public void ResetColors() => _parent.ResetColors();

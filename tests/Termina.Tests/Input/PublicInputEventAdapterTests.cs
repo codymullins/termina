@@ -103,19 +103,19 @@ public class PublicInputEventAdapterTests
         AssertKey(events[3], ConsoleKey.None, '!', default);
     }
 
-    [Theory]
-    [InlineData(MouseButton.WheelUp, +1)]
-    [InlineData(MouseButton.WheelDown, -1)]
-    public void PointerWheel_AdaptsToMouseScrollEvent(MouseButton button, int expectedDelta)
+    [Fact]
+    public void PointerWheel_IsNotAdapted()
     {
+        // The MouseButton enum no longer encodes wheel direction (the active input path emits
+        // MouseEventKind.ScrollUp/ScrollDown). This semantic adapter has no producer wired to it,
+        // so a wheel PointerInput adapts to no public events.
         var events = PublicInputEventAdapter.Adapt(new PointerInput(
             PointerAction.Wheel,
             X: 3,
             Y: 4,
-            button));
+            MouseButton.None));
 
-        var scroll = Assert.IsType<MouseScrollEvent>(Assert.Single(events));
-        Assert.Equal(expectedDelta, scroll.Delta);
+        Assert.Empty(events);
     }
 
     [Fact]
@@ -129,10 +129,10 @@ public class PublicInputEventAdapterTests
             KeyModifiers.Alt));
 
         var mouse = Assert.IsType<MouseEvent>(Assert.Single(events));
-        Assert.Equal(3, mouse.X);
-        Assert.Equal(4, mouse.Y);
+        Assert.Equal(3, mouse.Column);
+        Assert.Equal(4, mouse.Row);
         Assert.Equal(MouseButton.Left, mouse.Button);
-        Assert.Equal(MouseEventType.Press, mouse.EventType);
+        Assert.Equal(MouseEventKind.Down, mouse.Kind);
         Assert.Equal(ConsoleModifiers.Alt, mouse.Modifiers);
     }
 

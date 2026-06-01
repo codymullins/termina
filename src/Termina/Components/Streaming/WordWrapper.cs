@@ -1,3 +1,5 @@
+using Termina.Terminal;
+
 namespace Termina.Components.Streaming;
 
 /// <summary>
@@ -22,51 +24,61 @@ public static class WordWrapper
         var result = new List<string>();
 
         // Handle text that's shorter than width
-        if (text.Length <= width)
+        if (TerminalText.GetDisplayWidth(text) <= width)
         {
             result.Add(text);
             return result;
         }
 
         var currentLine = new System.Text.StringBuilder();
+        var currentWidth = 0;
         var words = SplitIntoWords(text);
 
         foreach (var word in words)
         {
+            var wordWidth = TerminalText.GetDisplayWidth(word);
+
             // If word itself is longer than width, break it
-            if (word.Length > width)
+            if (wordWidth > width)
             {
                 // Flush current line if it has content
-                if (currentLine.Length > 0)
+                if (currentWidth > 0)
                 {
                     result.Add(currentLine.ToString());
                     currentLine.Clear();
+                    currentWidth = 0;
                 }
 
                 // Break long word into chunks
-                for (var i = 0; i < word.Length; i += width)
+                var remaining = word;
+                while (TerminalText.GetDisplayWidth(remaining) > width)
                 {
-                    var chunk = word.Substring(i, Math.Min(width, word.Length - i));
-                    if (chunk.Length == width)
-                    {
-                        result.Add(chunk);
-                    }
-                    else
-                    {
-                        currentLine.Append(chunk);
-                    }
+                    var chunk = TerminalText.TruncateToWidth(remaining, width);
+                    result.Add(chunk);
+                    remaining = TerminalText.SliceByWidth(
+                        remaining,
+                        TerminalText.GetDisplayWidth(chunk),
+                        TerminalText.GetDisplayWidth(remaining) - TerminalText.GetDisplayWidth(chunk));
+                }
+
+                if (remaining.Length > 0)
+                {
+                    currentLine.Append(remaining);
+                    currentWidth = TerminalText.GetDisplayWidth(remaining);
                 }
             }
-            else if (currentLine.Length == 0)
+            else if (currentWidth == 0)
             {
                 // Start of line
                 currentLine.Append(word);
+                currentWidth = wordWidth;
             }
-            else if (currentLine.Length + 1 + word.Length <= width)
+            else if (currentWidth + 1 + wordWidth <= width)
             {
                 // Word fits with space
                 currentLine.Append(' ');
                 currentLine.Append(word);
+                currentWidth += 1 + wordWidth;
             }
             else
             {
@@ -74,6 +86,7 @@ public static class WordWrapper
                 result.Add(currentLine.ToString());
                 currentLine.Clear();
                 currentLine.Append(word);
+                currentWidth = wordWidth;
             }
         }
 
@@ -126,9 +139,9 @@ public static class WordWrapper
         var words = new List<string>();
         var currentWord = new System.Text.StringBuilder();
 
-        foreach (var c in text)
+        foreach (var grapheme in TerminalText.EnumerateGraphemes(text))
         {
-            if (char.IsWhiteSpace(c))
+            if (grapheme.Text.Length > 0 && char.IsWhiteSpace(grapheme.Text, 0))
             {
                 if (currentWord.Length > 0)
                 {
@@ -140,7 +153,7 @@ public static class WordWrapper
             }
             else
             {
-                currentWord.Append(c);
+                currentWord.Append(grapheme.Text);
             }
         }
 

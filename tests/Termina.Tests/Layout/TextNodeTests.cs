@@ -196,6 +196,19 @@ public class TextNodeTests
     }
 
     [Fact]
+    public void Render_CenterAlignment_UsesDisplayWidth()
+    {
+        var terminal = new VirtualTerminal(80, 24);
+        var context = new RegionRenderContext(terminal, 0, 0, 80, 24);
+        var node = new TextNode("🖼X").AlignCenter().NoWrap();
+
+        node.Render(context, new Rect(0, 0, 6, 1));
+
+        Assert.Equal(" 🖼X", terminal.GetLine(0));
+        Assert.Equal('X', terminal.GetChar(3, 0));
+    }
+
+    [Fact]
     public void Render_RightAlignment_RightAlignsText()
     {
         var terminal = new VirtualTerminal(80, 24);

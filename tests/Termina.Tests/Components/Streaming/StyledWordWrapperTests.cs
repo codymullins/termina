@@ -93,6 +93,32 @@ public class StyledWordWrapperTests
     }
 
     [Fact]
+    public void WrapLine_WideGrapheme_UsesDisplayWidth()
+    {
+        var line = new StyledLine();
+        line.Append(new StyledSegment("🖼 HTML", new TextStyle(Color.Green)));
+
+        var wrapped = StyledWordWrapper.WrapLine(line, 3);
+
+        Assert.Equal(3, wrapped.Count);
+        Assert.Equal("🖼", wrapped[0].ToPlainText());
+        Assert.Equal("HTM", wrapped[1].ToPlainText());
+        Assert.Equal("L", wrapped[2].ToPlainText());
+    }
+
+    [Fact]
+    public void WrapLine_WidthOne_PreservesWideGrapheme()
+    {
+        var line = new StyledLine();
+        line.Append(new StyledSegment("🖼X", new TextStyle(Color.Green)));
+
+        var wrapped = StyledWordWrapper.WrapLine(line, 1);
+
+        Assert.Equal("🖼", wrapped[0].ToPlainText());
+        Assert.Equal("X", wrapped[1].ToPlainText());
+    }
+
+    [Fact]
     public void WrapLine_EmptyLine_ReturnsSingleEmptyLine()
     {
         var line = new StyledLine();

@@ -3,6 +3,7 @@
 
 using Termina.Input;
 using Termina.Platform;
+using MouseButton = Termina.Input.MouseButton;
 
 namespace Termina.Tests.Input;
 
@@ -79,16 +80,19 @@ public class TerminalInputFixtureTests
         yield return Case(
             "SGR mouse wheel up",
             "\x1b[<64;5;10M",
+            Mouse(MouseEventKind.ScrollUp, MouseButton.None, column: 4, row: 9),
             Scroll(+1));
 
         yield return Case(
             "SGR mouse wheel down",
             "\x1b[<65;5;10M",
+            Mouse(MouseEventKind.ScrollDown, MouseButton.None, column: 4, row: 9),
             Scroll(-1));
 
         yield return Case(
-            "SGR mouse click is consumed",
-            "\x1b[<0;5;10M");
+            "SGR mouse click emits a MouseEvent",
+            "\x1b[<0;5;10M",
+            Mouse(MouseEventKind.Down, MouseButton.Left, column: 4, row: 9));
 
         yield return Case(
             "Bracketed paste emits one paste event",
@@ -193,6 +197,14 @@ public class TerminalInputFixtureTests
                 Assert.Equal(expected.Delta, scroll.Delta);
                 break;
 
+            case ExpectedEventKind.Mouse:
+                var mouse = Assert.IsType<MouseEvent>(actual);
+                Assert.Equal(expected.MouseKind, mouse.Kind);
+                Assert.Equal(expected.Button, mouse.Button);
+                Assert.Equal(expected.Column, mouse.Column);
+                Assert.Equal(expected.Row, mouse.Row);
+                break;
+
             case ExpectedEventKind.Paste:
                 var paste = Assert.IsType<PasteEvent>(actual);
                 Assert.Equal(expected.Content, paste.Content);
@@ -215,6 +227,9 @@ public class TerminalInputFixtureTests
     private static ExpectedEvent Scroll(int delta) =>
         new(ExpectedEventKind.Scroll, Delta: delta);
 
+    private static ExpectedEvent Mouse(MouseEventKind kind, Termina.Input.MouseButton button, int column, int row) =>
+        new(ExpectedEventKind.Mouse, MouseKind: kind, Button: button, Column: column, Row: row);
+
     private static ExpectedEvent Paste(string content) =>
         new(ExpectedEventKind.Paste, Content: content);
 
@@ -233,12 +248,17 @@ public class TerminalInputFixtureTests
         char KeyChar = '\0',
         ConsoleModifiers Modifiers = default,
         int Delta = 0,
-        string? Content = null);
+        string? Content = null,
+        MouseEventKind MouseKind = default,
+        Termina.Input.MouseButton Button = default,
+        int Column = 0,
+        int Row = 0);
 
     public enum ExpectedEventKind
     {
         Key,
         Scroll,
+        Mouse,
         Paste,
     }
 }

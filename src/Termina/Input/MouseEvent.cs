@@ -9,7 +9,7 @@ namespace Termina.Input;
 public enum MouseButton
 {
     /// <summary>
-    /// No button.
+    /// No button (e.g. a hover/move event with no button held).
     /// </summary>
     None,
 
@@ -29,58 +29,97 @@ public enum MouseButton
     Middle,
 
     /// <summary>
-    /// Scroll wheel up.
+    /// Back / button 4 (extended button, SGR code 8).
     /// </summary>
-    WheelUp,
+    Back,
 
     /// <summary>
-    /// Scroll wheel down.
+    /// Forward / button 5 (extended button, SGR code 9).
     /// </summary>
-    WheelDown
+    Forward,
 }
 
 /// <summary>
-/// Type of mouse event.
+/// Kind of mouse event. Press and release are reported separately; the application synthesizes
+/// clicks from a press/release pair. Scroll directions are distinct kinds because the wheel never
+/// produces a release event.
 /// </summary>
-public enum MouseEventType
+public enum MouseEventKind
 {
     /// <summary>
-    /// Mouse button pressed down.
+    /// A mouse button was pressed.
     /// </summary>
-    Press,
+    Down,
 
     /// <summary>
-    /// Mouse button released.
+    /// A mouse button was released.
     /// </summary>
-    Release,
+    Up,
 
     /// <summary>
-    /// Mouse moved while button held.
+    /// The mouse moved while a button was held.
     /// </summary>
     Drag,
 
     /// <summary>
-    /// Mouse moved without button held.
+    /// The mouse moved with no button held (only reported under <see cref="Terminal.MouseMode.Hover"/>).
     /// </summary>
     Move,
 
     /// <summary>
-    /// Mouse wheel scrolled.
+    /// The wheel scrolled up (toward older content).
     /// </summary>
-    Scroll
+    ScrollUp,
+
+    /// <summary>
+    /// The wheel scrolled down (toward newer content).
+    /// </summary>
+    ScrollDown,
+
+    /// <summary>
+    /// The wheel scrolled left.
+    /// </summary>
+    ScrollLeft,
+
+    /// <summary>
+    /// The wheel scrolled right.
+    /// </summary>
+    ScrollRight,
 }
 
 /// <summary>
-/// Low-level mouse input event.
+/// A decoded mouse input event.
 /// </summary>
-/// <param name="X">X position (column) of the mouse cursor.</param>
-/// <param name="Y">Y position (row) of the mouse cursor.</param>
-/// <param name="Button">The mouse button involved.</param>
-/// <param name="EventType">The type of mouse event.</param>
+/// <param name="Column">0-based column (cell) of the mouse cursor.</param>
+/// <param name="Row">0-based row (cell) of the mouse cursor.</param>
+/// <param name="Button">The mouse button involved (<see cref="MouseButton.None"/> for move/scroll).</param>
+/// <param name="Kind">The kind of mouse event.</param>
 /// <param name="Modifiers">Any keyboard modifiers held during the event.</param>
+/// <param name="ClickChain">
+/// 1 for a single click, 2 for a double click, 3 for a triple click. Synthesized by the input
+/// source from consecutive <see cref="MouseEventKind.Down"/> events in the same cell within the
+/// double-click window. Always 1 for non-Down events.
+/// </param>
+/// <param name="PixelX">Sub-cell X pixel offset when pixel reporting is active, else -1.</param>
+/// <param name="PixelY">Sub-cell Y pixel offset when pixel reporting is active, else -1.</param>
 public sealed record MouseEvent(
-    int X,
-    int Y,
+    int Column,
+    int Row,
     MouseButton Button,
-    MouseEventType EventType,
-    ConsoleModifiers Modifiers = 0) : IInputEvent;
+    MouseEventKind Kind,
+    ConsoleModifiers Modifiers = 0,
+    int ClickChain = 1,
+    int PixelX = -1,
+    int PixelY = -1) : IInputEvent
+{
+    /// <summary>
+    /// Set by a handler that has consumed this event, stopping it from bubbling to ancestors.
+    /// </summary>
+    public bool Handled { get; set; }
+
+    /// <summary>
+    /// Whether this is a scroll-wheel event (one of the Scroll* kinds).
+    /// </summary>
+    public bool IsScroll => Kind is MouseEventKind.ScrollUp or MouseEventKind.ScrollDown
+        or MouseEventKind.ScrollLeft or MouseEventKind.ScrollRight;
+}

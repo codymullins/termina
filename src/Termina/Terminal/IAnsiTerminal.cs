@@ -35,6 +35,12 @@ public interface IAnsiTerminal
     void Write(char c);
 
     /// <summary>
+    /// Write a terminal control sequence at an absolute position without recording it as
+    /// renderable text cells. Intended for terminal extension protocols such as Kitty graphics.
+    /// </summary>
+    void WriteControlAt(int x, int y, string sequence);
+
+    /// <summary>
     /// Set the foreground color for subsequent writes.
     /// </summary>
     void SetForeground(Color color);
@@ -48,6 +54,19 @@ public interface IAnsiTerminal
     /// Reset colors to terminal defaults.
     /// </summary>
     void ResetColors();
+
+    /// <summary>
+    /// Set text decorations for subsequent writes.
+    /// </summary>
+    void SetDecoration(TextDecoration decoration);
+
+    /// <summary>
+    /// Set the hyperlink (OSC 8) applied to subsequent writes, or <c>null</c> to clear it. Ambient
+    /// state, mirroring the color/decoration setters: text written while a link is set becomes a
+    /// clickable terminal hyperlink. Under double-buffering the link is recorded per cell and the
+    /// OSC 8 wrapper is emitted in-band during flush so it survives diffing.
+    /// </summary>
+    void SetLink(string? uri);
 
     /// <summary>
     /// Save the current cursor position.
@@ -102,6 +121,21 @@ public interface IAnsiTerminal
     /// Disable mouse tracking.
     /// </summary>
     void DisableMouse();
+
+    /// <summary>
+    /// Set the active mouse tracking modes, emitting the minimal set of enable/disable escape
+    /// sequences needed to transition from the current mode set. SGR transport (CSI ?1006h) is
+    /// always written last so it wins over legacy encodings. Side effect: while any tracking mode
+    /// is active the host terminal stops handling native click-drag text selection.
+    /// </summary>
+    void SetMouseMode(MouseMode mode);
+
+    /// <summary>
+    /// Defensively disable every mouse and focus tracking mode regardless of currently-tracked
+    /// state. Intended for teardown paths (normal exit, Ctrl+C, process exit, unhandled exception)
+    /// so the host terminal is never left flooding the application with tracking sequences.
+    /// </summary>
+    void DisableAllMouseTracking();
 
     /// <summary>
     /// Enable wheel-only scrolling via the terminal's alternate-scroll mode (CSI ?1007h).

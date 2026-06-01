@@ -83,7 +83,7 @@ public sealed class StyledLine
     public IReadOnlyList<StyledSegment> Segments => _segments;
 
     /// <summary>
-    /// Total character length of the line.
+    /// Total display width of the line in terminal cells.
     /// </summary>
     public int Length => _length;
 
@@ -146,9 +146,11 @@ public sealed class StyledLine
         if (_segments.Count > 0)
         {
             var last = _segments[^1];
-            if (last.Style.Equals(segment.Style))
+            if (last.Style.Equals(segment.Style) && !last.HasControlSequence && !segment.HasControlSequence
+                && last.Link == segment.Link)
             {
-                _segments[^1] = new StyledSegment(last.Text + segment.Text, last.Style);
+                var combined = last.Text + segment.Text;
+                _segments[^1] = new StyledSegment(combined, last.Style) { Link = last.Link };
                 _length += segment.Length;
                 return;
             }
@@ -202,8 +204,7 @@ public sealed class StyledLine
 
             if (takeLength > 0)
             {
-                var subText = segment.Text.Substring(segmentStart, takeLength);
-                result.AppendInternal(new StyledSegment(subText, segment.Style));
+                result.AppendInternal(segment.Substring(segmentStart, takeLength));
             }
 
             currentIndex += segment.Length;
@@ -239,7 +240,7 @@ public sealed class StyledLine
         if (_segments.Count == 1)
             return _segments[0].Text;
 
-        var sb = new StringBuilder(_length);
+        var sb = new StringBuilder();
         foreach (var segment in _segments)
         {
             sb.Append(segment.Text);
@@ -281,17 +282,19 @@ public sealed class StyledLine
     {
         get
         {
-            if (index < 0 || index >= _length)
+            var plainTextLength = _segments.Sum(s => s.Text.Length);
+            if (index < 0 || index >= plainTextLength)
                 throw new ArgumentOutOfRangeException(nameof(index));
 
             var currentIndex = 0;
             foreach (var segment in _segments)
             {
-                if (index < currentIndex + segment.Length)
+                var textLength = segment.Text.Length;
+                if (index < currentIndex + textLength)
                 {
                     return segment.Text[index - currentIndex];
                 }
-                currentIndex += segment.Length;
+                currentIndex += textLength;
             }
 
             throw new ArgumentOutOfRangeException(nameof(index));
@@ -306,17 +309,19 @@ public sealed class StyledLine
     /// <exception cref="ArgumentOutOfRangeException">Thrown when index is out of range.</exception>
     public TextStyle GetStyleAt(int index)
     {
-        if (index < 0 || index >= _length)
+        var plainTextLength = _segments.Sum(s => s.Text.Length);
+        if (index < 0 || index >= plainTextLength)
             throw new ArgumentOutOfRangeException(nameof(index));
 
         var currentIndex = 0;
         foreach (var segment in _segments)
         {
-            if (index < currentIndex + segment.Length)
+            var textLength = segment.Text.Length;
+            if (index < currentIndex + textLength)
             {
                 return segment.Style;
             }
-            currentIndex += segment.Length;
+            currentIndex += textLength;
         }
 
         throw new ArgumentOutOfRangeException(nameof(index));

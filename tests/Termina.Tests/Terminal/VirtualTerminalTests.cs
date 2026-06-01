@@ -78,6 +78,17 @@ public class VirtualTerminalTests
     }
 
     [Fact]
+    public void Write_WideGrapheme_AdvancesByDisplayWidth()
+    {
+        var terminal = new VirtualTerminal(10, 2);
+
+        terminal.Write("🖼X");
+
+        Assert.Equal("🖼X", terminal.GetLine(0));
+        Assert.Equal(3, terminal.CursorX);
+    }
+
+    [Fact]
     public void Write_NewlineResetsXAndAdvancesY()
     {
         var terminal = new VirtualTerminal();
@@ -151,11 +162,24 @@ public class VirtualTerminalTests
     }
 
     [Fact]
-    public void ResetColors_SetsColorsToDefault()
+    public void SetDecoration_AffectsSubsequentWrites()
+    {
+        var terminal = new VirtualTerminal();
+        terminal.SetDecoration(TextDecoration.Bold | TextDecoration.Underline);
+        terminal.MoveTo(0, 0);
+
+        terminal.Write("X");
+
+        Assert.Equal(TextDecoration.Bold | TextDecoration.Underline, terminal.GetDecoration(0, 0));
+    }
+
+    [Fact]
+    public void ResetColors_SetsStyleToDefault()
     {
         var terminal = new VirtualTerminal();
         terminal.SetForeground(Color.Red);
         terminal.SetBackground(Color.Blue);
+        terminal.SetDecoration(TextDecoration.Bold);
 
         terminal.ResetColors();
         terminal.MoveTo(0, 0);
@@ -163,6 +187,7 @@ public class VirtualTerminalTests
 
         Assert.Equal(Color.Default, terminal.GetForeground(0, 0));
         Assert.Equal(Color.Default, terminal.GetBackground(0, 0));
+        Assert.Equal(TextDecoration.None, terminal.GetDecoration(0, 0));
     }
 
     [Fact]

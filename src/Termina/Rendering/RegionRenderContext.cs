@@ -14,6 +14,7 @@ public sealed class RegionRenderContext : IRenderContext
     private readonly IAnsiTerminal _terminal;
     private readonly int _offsetX;
     private readonly int _offsetY;
+    private readonly HitTestTree? _hitTest;
 
     /// <summary>
     /// Create a render context for a specific screen region.
@@ -23,11 +24,13 @@ public sealed class RegionRenderContext : IRenderContext
     /// <param name="offsetY">The Y offset (screen row) of the region's top-left corner.</param>
     /// <param name="width">The width of the region.</param>
     /// <param name="height">The height of the region.</param>
-    public RegionRenderContext(IAnsiTerminal terminal, int offsetX, int offsetY, int width, int height)
+    /// <param name="hitTest">Optional frame-scoped hit-test index for mouse routing.</param>
+    public RegionRenderContext(IAnsiTerminal terminal, int offsetX, int offsetY, int width, int height, HitTestTree? hitTest = null)
     {
         _terminal = terminal;
         _offsetX = offsetX;
         _offsetY = offsetY;
+        _hitTest = hitTest;
         Width = width;
         Height = height;
     }
@@ -46,15 +49,15 @@ public sealed class RegionRenderContext : IRenderContext
 
         // Clip text to fit within region
         var startX = Math.Max(0, x);
-        var skipChars = startX - x;
+        var skipWidth = startX - x;
         var availableWidth = Width - startX;
 
-        if (skipChars >= text.Length || availableWidth <= 0)
+        if (TerminalText.GetDisplayWidth(text) <= skipWidth || availableWidth <= 0)
             return;
 
-        var clippedText = text.Substring(skipChars);
-        if (clippedText.Length > availableWidth)
-            clippedText = clippedText.Substring(0, availableWidth);
+        var clippedText = TerminalText.SliceByWidth(text, skipWidth, availableWidth);
+        if (clippedText.Length == 0)
+            return;
 
         _terminal.MoveTo(_offsetX + startX, _offsetY + y);
         _terminal.Write(clippedText);
@@ -68,6 +71,15 @@ public sealed class RegionRenderContext : IRenderContext
 
         _terminal.MoveTo(_offsetX + x, _offsetY + y);
         _terminal.Write(c);
+    }
+
+    /// <inheritdoc />
+    public void WriteControlAt(int x, int y, string sequence)
+    {
+        if (x < 0 || x >= Width || y < 0 || y >= Height || string.IsNullOrEmpty(sequence))
+            return;
+
+        _terminal.WriteControlAt(_offsetX + x, _offsetY + y, sequence);
     }
 
     /// <inheritdoc />
@@ -91,24 +103,7 @@ public sealed class RegionRenderContext : IRenderContext
     /// <inheritdoc />
     public void SetDecoration(TextDecoration decoration)
     {
-        // Reset any previous decorations first
-        if (decoration == TextDecoration.None)
-        {
-            // Just reset - handled by ResetColors
-            return;
-        }
-
-        // Apply requested decorations
-        if (decoration.HasFlag(TextDecoration.Bold))
-            _terminal.Write(AnsiCodes.Bold);
-        if (decoration.HasFlag(TextDecoration.Dim))
-            _terminal.Write(AnsiCodes.Dim);
-        if (decoration.HasFlag(TextDecoration.Italic))
-            _terminal.Write(AnsiCodes.Italic);
-        if (decoration.HasFlag(TextDecoration.Underline))
-            _terminal.Write(AnsiCodes.Underline);
-        if (decoration.HasFlag(TextDecoration.Strikethrough))
-            _terminal.Write(AnsiCodes.Strikethrough);
+        _terminal.SetDecoration(decoration);
     }
 
     /// <inheritdoc />
@@ -167,6 +162,20 @@ public sealed class RegionRenderContext : IRenderContext
             _offsetX + clippedX,
             _offsetY + clippedY,
             clippedWidth,
-            clippedHeight);
+            clippedHeight,
+            _hitTest);
     }
+
+    /// <inheritdoc />
+    public void RegisterHit(object node, Layout.Rect bounds, HitTestKind kind)
+    {
+        if (_hitTest is null)
+            return;
+
+        var absolute = new Layout.Rect(_offsetX + bounds.X, _offsetY + bounds.Y, bounds.Width, bounds.Height);
+        _hitTest.Register(node, absolute, kind);
+    }
+
+    /// <inheritdoc />
+    public void SetLink(string? uri) => _terminal.SetLink(uri);
 }

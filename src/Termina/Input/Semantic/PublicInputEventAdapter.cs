@@ -62,19 +62,17 @@ internal static class PublicInputEventAdapter
     {
         if (pointerInput.Action == PointerAction.Wheel)
         {
-            return pointerInput.Button switch
-            {
-                MouseButton.WheelUp => [new MouseScrollEvent(+1)],
-                MouseButton.WheelDown => [new MouseScrollEvent(-1)],
-                _ => [],
-            };
+            // The MouseButton enum no longer encodes wheel direction (the active path emits
+            // MouseEventKind.ScrollUp/ScrollDown instead). This semantic adapter is not yet wired
+            // to a producer, so there is no direction to translate here.
+            return [];
         }
 
         return [new MouseEvent(
             pointerInput.X,
             pointerInput.Y,
             pointerInput.Button,
-            pointerInput.Action.ToMouseEventType(),
+            pointerInput.Action.ToMouseEventKind(),
             pointerInput.Modifiers.ToConsoleModifiers())];
     }
 
@@ -124,13 +122,13 @@ internal static class PublicInputEventAdapter
         _ => ConsoleKey.None,
     };
 
-    private static MouseEventType ToMouseEventType(this PointerAction action) => action switch
+    private static MouseEventKind ToMouseEventKind(this PointerAction action) => action switch
     {
-        PointerAction.Press => MouseEventType.Press,
-        PointerAction.Release => MouseEventType.Release,
-        PointerAction.Drag => MouseEventType.Drag,
-        PointerAction.Move => MouseEventType.Move,
-        PointerAction.Wheel => MouseEventType.Scroll,
-        _ => MouseEventType.Move,
+        PointerAction.Press => MouseEventKind.Down,
+        PointerAction.Release => MouseEventKind.Up,
+        PointerAction.Drag => MouseEventKind.Drag,
+        PointerAction.Move => MouseEventKind.Move,
+        PointerAction.Wheel => MouseEventKind.ScrollUp,
+        _ => MouseEventKind.Move,
     };
 }

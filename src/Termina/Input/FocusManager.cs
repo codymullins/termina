@@ -107,6 +107,18 @@ public sealed class FocusManager : IFocusManager, IDisposable
     }
 
     /// <inheritdoc />
+    public void SetFocusFromPointer(IFocusable focusable)
+    {
+        ArgumentNullException.ThrowIfNull(focusable);
+
+        if (!focusable.CanFocus || ReferenceEquals(CurrentFocus, focusable))
+            return;
+
+        TerminaTrace.Focus.Debug(this, "SetFocusFromPointer: {0}", focusable.GetType().Name);
+        SetFocus(focusable);
+    }
+
+    /// <inheritdoc />
     public void ClearFocus()
     {
         // Blur all focused components

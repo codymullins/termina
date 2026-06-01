@@ -51,6 +51,13 @@ public sealed class TerminaApplication
     private readonly Stack<(string Path, IReadOnlyDictionary<string, object>? Parameters)> _history = new();
     private readonly List<IInputSource> _inputSources = new();
     private readonly FocusManager _focusManager = new();
+    private readonly Rendering.HitTestTree _hitTest = new();
+    private readonly MouseOptions _mouseOptions = new();
+    private readonly MouseClickChainTracker _clickChain;
+    private IMouseAware? _dragTarget;
+    private Rect _dragBounds;
+    private IHoverAware? _hoveredNode;
+    private int _hoverSubscribers;
     private readonly IToastService? _toastService;
     private readonly ToastOverlayNode? _toastOverlay;
     private readonly IDisposable? _toastInvalidationSubscription;
@@ -65,7 +72,6 @@ public sealed class TerminaApplication
     private static readonly TimeSpan CtrlCDoublePressWindow = TimeSpan.FromSeconds(2);
     private bool _rawInputActive;
     private bool _kittyKeyboardPushed;
-    private bool _wheelScrollEnabledByApp;
 
     /// <summary>
     /// Creates a new Termina application.
@@ -75,6 +81,10 @@ public sealed class TerminaApplication
         : this(terminal, runtimeOptions: null, serviceProvider: null)
     {
     }
+
+    private ConsoleCancelEventHandler? _cancelHandler;
+    private EventHandler? _processExitHandler;
+    private UnhandledExceptionEventHandler? _unhandledExceptionHandler;
 
     /// <summary>
     /// Creates a new Termina application.
@@ -123,6 +133,7 @@ public sealed class TerminaApplication
 
         _runtimeOptions = runtimeOptions ?? new TerminaRuntimeOptions();
         _serviceProvider = serviceProvider;
+        _clickChain = new MouseClickChainTracker(_mouseOptions.DoubleClickThreshold);
         _eventChannel = Channel.CreateUnbounded<object>();
         _toastService = serviceProvider?.GetService<IToastService>();
         _toastOverlay = _toastService != null ? new ToastOverlayNode(_toastService) : null;
@@ -140,9 +151,78 @@ public sealed class TerminaApplication
     }
 
     /// <summary>
+    /// The mouse tracking modes enabled when the application starts. Defaults to
+    /// <see cref="MouseMode.Buttons"/> | <see cref="MouseMode.Drag"/> | <see cref="MouseMode.Focus"/>,
+    /// which gives clicks, drag-select, and focus in/out events. Set to <see cref="MouseMode.None"/>
+    /// before <see cref="RunAsync"/> to fall back to wheel-only scrolling that preserves the host
+    /// terminal's native text selection. Hover (<see cref="MouseMode.Hover"/>) is added automatically
+    /// when a component opts in, so it does not need to be set here.
+    /// </summary>
+    public MouseMode MouseMode { get; set; } = MouseMode.Buttons | MouseMode.Drag | MouseMode.Focus;
+
+    /// <summary>
+    /// Tunable mouse behavior (double-click threshold, copy-on-select, link activation modifier).
+    /// </summary>
+    public MouseOptions MouseOptions => _mouseOptions;
+
+    /// <summary>
     /// Observable stream of input events. ViewModels subscribe to this.
     /// </summary>
     public Observable<IInputEvent> Input => _inputSubject.AsObservable();
+
+    /// <summary>
+    /// Request hover (any-event) mouse tracking. Reference-counted: any-event tracking (CSI ?1003h)
+    /// is enabled on the first request and disabled when the last requester releases it. Call from a
+    /// hover-aware component when it becomes active.
+    /// </summary>
+    public void EnableHover()
+    {
+        _hoverSubscribers++;
+        ReconcileHover(flush: true);
+    }
+
+    /// <summary>
+    /// Release a hover request previously made with <see cref="EnableHover"/>.
+    /// </summary>
+    public void DisableHover()
+    {
+        if (_hoverSubscribers > 0)
+            _hoverSubscribers--;
+        ReconcileHover(flush: true);
+    }
+
+    /// <summary>
+    /// Turns any-event (hover) tracking on or off so it matches demand — either an explicit
+    /// <see cref="EnableHover"/> request or a hover-aware node present in the current frame. Only
+    /// acts when base mouse tracking is already enabled, so an app that opted out of tracking
+    /// (to keep native selection) is never forced into it.
+    /// </summary>
+    private void ReconcileHover(bool flush)
+    {
+        var baseTracking = (MouseMode & (MouseMode.Buttons | MouseMode.Drag)) != 0;
+        if (!baseTracking && _hoverSubscribers == 0)
+            return;
+
+        var want = _hoverSubscribers > 0 || _hitTest.HasHoverTarget;
+        var have = (MouseMode & MouseMode.Hover) != 0;
+        if (want == have)
+            return;
+
+        if (want)
+            MouseMode |= MouseMode.Hover;
+        else
+            MouseMode &= ~MouseMode.Hover;
+
+        _terminal.SetMouseMode(MouseMode);
+        if (flush)
+            _terminal.Flush();
+
+        if (!want && _hoveredNode is not null)
+        {
+            _hoveredNode.OnMouseLeave();
+            _hoveredNode = null;
+        }
+    }
 
     /// <summary>
     /// Gets the focus manager for routing input to focused components.
@@ -449,6 +529,12 @@ public sealed class TerminaApplication
             TerminaTrace.Render.Debug(this, "Entered alternate screen, cursor hidden, flushed");
 
             var inTmux = Environment.GetEnvironmentVariable("TMUX") is not null;
+
+            // Register emergency teardown so a Ctrl+C, process exit, or unhandled exception that
+            // bypasses the finally block below still clears mouse/focus tracking. Without this the
+            // host terminal is left flooding the next program with tracking sequences.
+            RegisterEmergencyTeardown();
+
             Console.Write(AnsiCodes.EnableBracketedPaste);
 
             // When running inside tmux, the inner-pane ESC[?2004h above is intercepted by tmux
@@ -464,19 +550,21 @@ public sealed class TerminaApplication
             var kittyFlags = GetKittyKeyboardFlags();
             _kittyKeyboardPushed = KittyKeyboardEnhancement.TryEnter(this, kittyFlags, inTmux);
 
-            if (_runtimeOptions.ScrollInputMode == ScrollInputMode.AlternateScroll && _rawInputActive)
+            // Enable the configured mouse tracking stack. With full tracking on, the wheel arrives
+            // as SGR button 64/65 events (decoded to MouseScrollEvent), so the legacy
+            // alternate-scroll mode is only needed when mouse tracking is off.
+            if ((MouseMode & (MouseMode.Buttons | MouseMode.Drag | MouseMode.Hover)) != 0)
             {
-                // Alternate-scroll preserves native selection/clipboard behavior but only works
-                // correctly when the input parser sees raw byte sequences.
-                _terminal.EnableWheelScroll();
-                _wheelScrollEnabledByApp = true;
+                _terminal.SetMouseMode(MouseMode);
             }
             else
             {
-                _terminal.EnableMouse();
-                _wheelScrollEnabledByApp = false;
+                _terminal.EnableWheelScroll();
+                if ((MouseMode & MouseMode.Focus) != 0)
+                {
+                    _terminal.SetMouseMode(MouseMode.Focus);
+                }
             }
-
             _terminal.Flush();
 
             // Initial render
@@ -514,11 +602,11 @@ public sealed class TerminaApplication
                 Console.Write(AnsiCodes.TmuxPassthrough(AnsiCodes.DisableBracketedPaste));
             }
 
-            if (_wheelScrollEnabledByApp)
-                _terminal.DisableWheelScroll();
-            else
-                _terminal.DisableMouse();
-
+            // Restore terminal state fully to avoid artifacts. Disable every tracking mode
+            // defensively in case a capability probe or component turned one on without our
+            // tracked state reflecting it.
+            _terminal.DisableWheelScroll();
+            _terminal.DisableAllMouseTracking();
             _terminal.SetCursorVisible(true);
             _terminal.ResetColors();
             _terminal.ExitAlternateScreen();
@@ -545,9 +633,59 @@ public sealed class TerminaApplication
         }
         finally
         {
+            UnregisterEmergencyTeardown();
             _shutdownCts.Dispose();
             _shutdownCts = null;
         }
+    }
+
+    /// <summary>
+    /// Writes the mouse/focus/paste disable sequences straight to stdout, bypassing the buffered
+    /// terminal. Safe to call from a signal handler or finalizer — it only emits a short, fixed
+    /// string and swallows any I/O error.
+    /// </summary>
+    private static void EmergencyTerminalReset()
+    {
+        try
+        {
+            Console.Out.Write(
+                AnsiCodes.DisableMousePixels +
+                AnsiCodes.DisableMouseSgr +
+                AnsiCodes.DisableMouseAnyEvent +
+                AnsiCodes.DisableMouseButtonEvent +
+                AnsiCodes.DisableMouseNormal +
+                AnsiCodes.DisableFocusTracking +
+                AnsiCodes.DisableBracketedPaste +
+                AnsiCodes.DisableAlternateScroll);
+            Console.Out.Flush();
+        }
+        catch
+        {
+            // Best effort — never throw from a teardown path.
+        }
+    }
+
+    private void RegisterEmergencyTeardown()
+    {
+        _cancelHandler = (_, _) => EmergencyTerminalReset();
+        _processExitHandler = (_, _) => EmergencyTerminalReset();
+        _unhandledExceptionHandler = (_, _) => EmergencyTerminalReset();
+        Console.CancelKeyPress += _cancelHandler;
+        AppDomain.CurrentDomain.ProcessExit += _processExitHandler;
+        AppDomain.CurrentDomain.UnhandledException += _unhandledExceptionHandler;
+    }
+
+    private void UnregisterEmergencyTeardown()
+    {
+        if (_cancelHandler is not null)
+            Console.CancelKeyPress -= _cancelHandler;
+        if (_processExitHandler is not null)
+            AppDomain.CurrentDomain.ProcessExit -= _processExitHandler;
+        if (_unhandledExceptionHandler is not null)
+            AppDomain.CurrentDomain.UnhandledException -= _unhandledExceptionHandler;
+        _cancelHandler = null;
+        _processExitHandler = null;
+        _unhandledExceptionHandler = null;
     }
 
     /// <summary>
@@ -640,15 +778,42 @@ public sealed class TerminaApplication
 
             case MouseScrollEvent mouseScroll:
                 const int linesPerTick = 3;
+                // Coalesce same-direction wheel events already queued (touchpad inertia can emit
+                // 30-60/sec) so a flick scrolls once by the summed amount rather than re-rendering
+                // per tick.
+                var ticks = 1;
+                var sign = Math.Sign(mouseScroll.Delta);
+                while (_eventChannel.Reader.TryPeek(out var peeked)
+                    && peeked is MouseScrollEvent queued
+                    && Math.Sign(queued.Delta) == sign)
+                {
+                    _eventChannel.Reader.TryRead(out _);
+                    ticks++;
+                }
+
                 if (_focusManager.CurrentFocus is IScrollable scrollable)
                 {
-                    if (mouseScroll.Delta > 0)
-                        scrollable.ScrollUp(linesPerTick);
+                    if (sign > 0)
+                        scrollable.ScrollUp(linesPerTick * ticks);
                     else
-                        scrollable.ScrollDown(linesPerTick);
+                        scrollable.ScrollDown(linesPerTick * ticks);
                     return; // Handled by focused scrollable
                 }
                 break; // No focused scrollable — fall through to ViewModel input observable
+
+            case MouseEvent mouse:
+                if (mouse.IsScroll)
+                    break; // Wheel handled via the parallel MouseScrollEvent above.
+                if (DispatchMouseEvent(mouse))
+                    return;
+                if (mouse.Kind is not MouseEventKind.Move)
+                    _inputSubject.OnNext(mouse);
+                return;
+
+            case TerminalFocusEvent focusEvent:
+                TerminaTrace.Input.Trace(this, "TerminalFocusEvent: hasFocus={0}", focusEvent.HasFocus);
+                _inputSubject.OnNext(focusEvent);
+                return;
         }
 
         // Route input events: Page (capture) -> Focus Manager (bubble) -> ViewModel
@@ -682,6 +847,112 @@ public sealed class TerminaApplication
             TerminaTrace.Input.Trace(this, "Routing input to ViewModel");
             _inputSubject.OnNext(inputEvent);
         }
+    }
+
+    /// <summary>
+    /// Routes a decoded mouse event: synthesizes the click chain, honors an active drag capture,
+    /// synthesizes hover enter/leave, then hit-tests and bubbles through the nodes under the cursor.
+    /// Falls back to focus-on-click for an unconsumed left press.
+    /// </summary>
+    /// <returns><c>true</c> if a node (or focus change) consumed the event.</returns>
+    private bool DispatchMouseEvent(MouseEvent e)
+    {
+        // Click-chain synthesis on press (single / double / triple).
+        if (e.Kind == MouseEventKind.Down)
+        {
+            _clickChain.SetThreshold(_mouseOptions.DoubleClickThreshold);
+            var chain = _clickChain.Register(e.Button, e.Column, e.Row);
+            e = e with { ClickChain = chain };
+        }
+
+        // Active drag: Drag/Up go straight to the node that captured the press, even if the cursor
+        // has since left that node — this is what makes drag-to-select work past a widget's edge.
+        if (_dragTarget is not null && e.Kind is MouseEventKind.Drag or MouseEventKind.Up)
+        {
+            var draggedHandled = _dragTarget.HandleMouse(e, _dragBounds);
+            if (e.Kind == MouseEventKind.Up)
+                _dragTarget = null;
+            return draggedHandled || e.Handled;
+        }
+
+        // Hover: enter/leave synthesis on motion with no button held, plus deliver the move to the
+        // top-most mouse-aware node so it can update intra-node hover state (e.g. a link span).
+        if (e.Kind == MouseEventKind.Move)
+        {
+            UpdateHover(e);
+            foreach (var entry in _hitTest.HitTestPath(e.Column, e.Row))
+            {
+                if (entry.Node is IMouseAware moveAware)
+                {
+                    moveAware.HandleMouse(e, entry.Bounds);
+                    break;
+                }
+            }
+            return false;
+        }
+
+        var path = _hitTest.HitTestPath(e.Column, e.Row);
+
+        // Bubble through the hit path (top-most first) until a node consumes the event.
+        foreach (var entry in path)
+        {
+            if (entry.Node is IMouseAware aware)
+            {
+                var consumed = aware.HandleMouse(e, entry.Bounds);
+                if (consumed || e.Handled)
+                {
+                    if (e.Kind == MouseEventKind.Down && e.Button == Termina.Input.MouseButton.Left)
+                    {
+                        _dragTarget = aware;
+                        _dragBounds = entry.Bounds;
+
+                        // Surface app-managed link activation as a global event too.
+                        if (aware is IHyperlink link && !string.IsNullOrEmpty(link.Url))
+                            _inputSubject.OnNext(new LinkActivatedEvent(link.Url, e.Modifiers));
+                    }
+                    return true;
+                }
+            }
+        }
+
+        // Focus-on-click: a left press nothing consumed focuses the nearest focusable in the path.
+        if (e.Kind == MouseEventKind.Down && e.Button == Termina.Input.MouseButton.Left)
+        {
+            foreach (var entry in path)
+            {
+                if (entry.Node is IFocusable { CanFocus: true } focusable)
+                {
+                    _focusManager.SetFocusFromPointer(focusable);
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Updates which <see cref="IHoverAware"/> node the cursor is over, firing leave on the old and
+    /// enter on the new when it changes.
+    /// </summary>
+    private void UpdateHover(MouseEvent e)
+    {
+        IHoverAware? target = null;
+        foreach (var entry in _hitTest.HitTestPath(e.Column, e.Row))
+        {
+            if (entry.Node is IHoverAware hover)
+            {
+                target = hover;
+                break;
+            }
+        }
+
+        if (ReferenceEquals(target, _hoveredNode))
+            return;
+
+        _hoveredNode?.OnMouseLeave();
+        _hoveredNode = target;
+        _hoveredNode?.OnMouseEnter();
     }
 
     /// <summary>
@@ -739,11 +1010,16 @@ public sealed class TerminaApplication
         var available = new Size(_terminal.Width, _terminal.Height);
         var measured = layoutRoot.Measure(available);
 
-        // Create a full-screen render context
-        var context = new RegionRenderContext(_terminal, 0, 0, _terminal.Width, _terminal.Height);
+        // Create a full-screen render context, rebuilding the hit-test index for this frame.
+        _hitTest.Clear();
+        var context = new RegionRenderContext(_terminal, 0, 0, _terminal.Width, _terminal.Height, _hitTest);
         var bounds = new Rect(0, 0, _terminal.Width, _terminal.Height);
 
         layoutRoot.Render(context, bounds);
+
+        // Match hover tracking to whether this frame drew any hover-aware node. SetMouseMode only
+        // emits escapes when the mode actually changes, so this is a no-op on a stable page.
+        ReconcileHover(flush: false);
 
         // Flush output
         _terminal.Flush();

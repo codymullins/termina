@@ -49,13 +49,13 @@ public class SemanticInputEventTests
             PointerAction.Wheel,
             X: 12,
             Y: 5,
-            MouseButton.WheelDown,
+            MouseButton.None,
             KeyModifiers.Alt);
 
         Assert.Equal(PointerAction.Wheel, pointer.Action);
         Assert.Equal(12, pointer.X);
         Assert.Equal(5, pointer.Y);
-        Assert.Equal(MouseButton.WheelDown, pointer.Button);
+        Assert.Equal(MouseButton.None, pointer.Button);
         Assert.Equal(KeyModifiers.Alt, pointer.Modifiers);
     }
 

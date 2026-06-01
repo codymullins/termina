@@ -99,6 +99,8 @@ public sealed class TextInputNode : TextInputBaseNode
         if (!bounds.HasArea)
             return;
 
+        context.RegisterHit(this, bounds, HitTestKind.Text);
+
         var inputContext = context.CreateSubContext(bounds);
 
         if (Background.HasValue)
@@ -250,5 +252,15 @@ public sealed class TextInputNode : TextInputBaseNode
     protected override void OnTextBufferChanged()
     {
         // No-op for single-line — _scrollOffset is adjusted during Render
+    }
+
+    /// <inheritdoc />
+    protected override int PositionToCursor(int localColumn, int localRow)
+    {
+        // Screen column maps to fullDisplayText index via the horizontal scroll offset; subtract
+        // the committed prefix width to land in the editable active-text coordinate space.
+        var prefixWidth = CommittedDisplayPrefix.Length;
+        var displayIndex = localColumn + _scrollOffset;
+        return Math.Clamp(displayIndex - prefixWidth, 0, _text.Length);
     }
 }
